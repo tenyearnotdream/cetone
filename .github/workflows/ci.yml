@@ -83,21 +83,17 @@ jobs:
         run: go tool viva build --target ${{ matrix.target }} --arch ${{ matrix.arch }}
 
       # viva names a native build plainly and a cross build with its target, so
-      # the check looks at what was produced rather than at a fixed name.
+      # the check looks at what was produced rather than at a fixed name. The
+      # program's own header decides its format: `file`'s wording differs
+      # between versions and hosts.
       - name: Check the program is the format the target needs
         run: |
           echo "produced:"
-          find build -maxdepth 2 -type f -printf "  %p\n"
-          program=$(find build -maxdepth 1 -type f \( -name 'cetone*' \) ! -name '*.deb' ! -name '*.tar.gz' ! -name '*.zip' | head -1)
-          if [ -z "$program" ]; then echo "no program was produced"; exit 1; fi
-          echo "checking $program:"
-          file "$program"
-          want="${{ matrix.target }}/${{ matrix.arch }}"
-          case "$want" in
-            linux/amd64)   file "$program" | grep -q "ELF 64-bit LSB.*x86-64" ;;
-            linux/arm64)   file "$program" | grep -q "ELF 64-bit LSB.*aarch64" ;;
-            windows/amd64) file "$program" | grep -q "PE32+ executable.*x86-64" ;;
-            windows/arm64) file "$program" | grep -q "PE32+ executable.*Aarch64" ;;
-            *) echo "unknown target $want"; exit 1 ;;
-          esac
-          echo "ok: $program is $want"
+          find build -maxdepth 1 -type f -printf "  %p\n"
+          program=$(find build -maxdepth 1 -type f -name 'cetone*' \
+            ! -name '*.deb' ! -name '*.tar.gz' ! -name '*.zip' | head -1)
+          if [ -z "$program" ]; then
+            echo "no program was produced"
+            exit 1
+          fi
+          ./.github/check-format.sh "$program" "${{ matrix.target }}/${{ matrix.arch }}"
