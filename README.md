@@ -1,9 +1,16 @@
 # Cetone
 
-用 **Go + [Viva](https://vivaui.dev)** 重写的网易云音乐 Linux 桌面客户端，参照
+[![CI](https://github.com/tenyearnotdream/cetone/actions/workflows/ci.yml/badge.svg)](https://github.com/tenyearnotdream/cetone/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tenyearnotdream/cetone)](https://github.com/tenyearnotdream/cetone/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](COPYING)
+
+用 **Go + [Viva](https://vivaui.dev)** 重写的网易云音乐桌面客户端，参照
 [netease-cloud-music-gtk](https://github.com/gmg137/netease-cloud-music-gtk) 的功能范围。
-没有 WebView，没有 GStreamer，没有 Rust/GTK 运行依赖：窗口由 Viva 直接画在 Vulkan 上，
-音频由自带的解码器（mp3 / flac）解码后交给 ALSA。
+没有 WebView，没有 GStreamer，没有 Rust/GTK 运行依赖：界面由 Viva 直接绘制
+（Linux 走 Vulkan/XCB，Windows 走 Direct3D 11，macOS 走 Metal），音频由自带的
+mp3/flac 解码器解码后交给各平台的默认输出设备。
+
+支持 Linux、Windows、macOS 三个桌面平台。
 
 ## 为什么保留“缓存优先”播放
 
@@ -86,12 +93,26 @@ GTK 版最有价值的一点：**会员期内缓存下来的歌曲，在会员�
 ```
 main.go                    入口：窗口尺寸、XDG 目录
 internal/ncm/              网易云 API：weapi/eapi 加密、Cookie 会话、各接口与解析
-internal/player/           播放引擎：mp3/flac/wav 解码、边下边播、ALSA 输出、位置推算
+internal/player/           播放引擎：mp3/flac/wav 解码、边下边播、跨平台音频输出、位置推算
 internal/store/            设置、会话、队列、缓存、歌词、封面（纯 JSON + 文件）
-internal/mpris/            Linux 桌面媒体控制（org.mpris.MediaPlayer2）
+internal/mpris/            Linux 桌面媒体控制（org.mpris.MediaPlayer2）；其他平台为空实现
 internal/app/              界面：窗口外壳、各页面、封面解码、二维码、后台任务队列
 cmd/shots/                 无窗口渲染各页面的开发工具（-tags vivashots）
 ```
+
+## 下载安装
+
+从 [Releases](https://github.com/tenyearnotdream/cetone/releases/latest) 取对应平台的包，
+每个 Release 都附 `SHA256SUMS`：
+
+| 平台 | 文件 | 怎么装 |
+| --- | --- | --- |
+| Linux x86_64 | `cetone_x.y.z_amd64.deb` | `sudo apt install ./cetone_x.y.z_amd64.deb`（自动装依赖） |
+| Linux x86_64 / arm64 | `cetone-x.y.z-linux-*.tar.gz` | 解开后 `./install.sh`（默认 `~/.local`，`--prefix` 可改） |
+| Windows x86_64 / arm64 | `cetone-x.y.z-windows-*.zip` | 解开直接运行 `cetone.exe` |
+| macOS arm64 / amd64 | `cetone-x.y.z-darwin-*.zip` | 解开得到 `Cetone.app`，第一次需右键「打开」 |
+
+校验下载：`sha256sum -c SHA256SUMS`。
 
 ## 构建与运行
 
@@ -161,9 +182,13 @@ git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHu
 
 ## 已知限制
 
-- **GPU 驱动**：窗口经 Vulkan 绘制。若驱动无法提供 Viva 需要的 surface
-  （例如本机 NVIDIA 上偶发的 `VK_ERROR_EXTENSION_NOT_PRESENT`），程序会自动用
+- **GPU 驱动（Linux）**：窗口经 Vulkan 绘制。若驱动无法提供 Viva 需要的 surface
+  （例如 NVIDIA 专有驱动上偶发的 `VK_ERROR_EXTENSION_NOT_PRESENT`），程序会自动用
   `VIVA_SOFTWARE_RENDERING=1` 以 CPU 渲染重启一次，并在标准错误说明原因。
+- **平台验证程度不同**：Linux 上实际运行、播放、托盘、MPRIS 都已验证；Windows 与
+  macOS 的产物能编译、能打包，但**我没有这两台机器，未能实际运行验证**。首次运行请
+  留意窗口、声音与托盘是否正常，有问题请提 issue。
+- **桌面媒体控制**：MPRIS 只有 Linux 有；Windows 与 macOS 的媒体键/系统媒体面板尚未接入。
 - **音频**：只解码 mp3 与 flac（接口正好用这两种格式覆盖全部音质档位）；
   不支持的容器会退回在线播放而不是崩溃。
 - **未登录时的 VIP 歌曲**：只能播放约 30 秒试听片段，程序会提示“仅可试听”
@@ -175,7 +200,7 @@ git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHu
 ## 与 GTK 版的差异
 
 - 渲染：GTK4 + libadwaita → Viva（自绘，Vulkan/XCB）。
-- 播放：GStreamer → 自带 mp3/flac 解码 + ALSA；因此**只支持 mp3 与 flac**
+- 播放：GStreamer → 自带 mp3/flac 解码；因此**只支持 mp3 与 flac**
   （接口对标准/较高/极高返回 mp3，对无损以上返回 flac，正好覆盖全部音质档位）。
 - 桌面歌词依赖外部 `desktop-lyrics`，本版未内置；歌词页面为应用内全屏视图。
 - 多语言：界面为中文，未接入 gettext。
