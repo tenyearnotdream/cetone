@@ -103,7 +103,16 @@ func (a *App) page(c ui.C) {
 
 	a.loginModal(c)
 	ui.Toasts(c, &a.toaster)
+	debugToastsCalled = true
+	debugBounds = c.Bounds()
 }
+
+// debugToastsCalled records that the page reached its toast declaration, and
+// debugBounds the page's own rectangle, for one investigation.
+var (
+	debugToastsCalled bool
+	debugBounds       ui.Rect
+)
 
 // sidebar is the navigation rail.
 func (a *App) sidebar(c ui.C) {
@@ -188,7 +197,9 @@ func (a *App) header(c ui.C) {
 	theme := c.Theme()
 	ui.Row(c).FillWidth().Height(52).PadX(16).Gap(10).Items(ui.Center).Background(theme.Background).Children(func() {
 		if len(a.nav) > 1 {
-			if ui.Button(c, "").Icon(iconBack).IconOnly().Ghost().Tooltip("返回").Clicked() {
+			back := ui.Button(c, "").Icon(iconBack).IconOnly().Ghost().Tooltip("返回")
+			back.Label("返回")
+			if back.Clicked() {
 				a.pop()
 			}
 		}
@@ -201,7 +212,9 @@ func (a *App) header(c ui.C) {
 		})
 		ui.Spacer(c)
 		a.searchBox(c)
-		if ui.Button(c, "").Icon(iconQueue).IconOnly().Ghost().Tooltip("播放列表").Clicked() {
+		queue := ui.Button(c, "").Icon(iconQueue).IconOnly().Ghost().Tooltip("播放列表")
+		queue.Label("播放列表")
+		if queue.Clicked() {
 			a.queuePanel = !a.queuePanel
 		}
 	})
@@ -321,10 +334,14 @@ func (a *App) playerBar(c ui.C) {
 			case "off":
 				repeatTip = "不循环"
 			}
-			if ui.Button(c, "").Icon(repeatIcon).IconOnly().Ghost().Tooltip(repeatTip).Clicked() {
+			repeat := ui.Button(c, "").Icon(repeatIcon).IconOnly().Ghost().Tooltip(repeatTip)
+			repeat.Label("播放模式")
+			if repeat.Clicked() {
 				a.cycleRepeat()
 			}
-			if ui.Button(c, "").Icon(iconPrevious).IconOnly().Ghost().Tooltip("上一首").Disabled(!hasSong).Clicked() {
+			previous := ui.Button(c, "").Icon(iconPrevious).IconOnly().Ghost().Tooltip("上一首").Disabled(!hasSong)
+			previous.Label("上一首")
+			if previous.Clicked() {
 				a.previous()
 			}
 			play := ui.Button(c, "")
@@ -333,14 +350,18 @@ func (a *App) playerBar(c ui.C) {
 			if play.Clicked() {
 				a.togglePlay()
 			}
-			if ui.Button(c, "").Icon(iconNext).IconOnly().Ghost().Tooltip("下一首").Disabled(!hasSong).Clicked() {
+			next := ui.Button(c, "").Icon(iconNext).IconOnly().Ghost().Tooltip("下一首").Disabled(!hasSong)
+			next.Label("下一首")
+			if next.Clicked() {
 				a.next()
 			}
 			heartbeatTip := "心动模式"
 			if a.heartbeat {
 				heartbeatTip = "关闭心动模式"
 			}
-			if box := ui.Button(c, "").Icon(iconHeart).IconOnly().Ghost().Tooltip(heartbeatTip); a.heartbeat {
+			heartbeatButton := ui.Button(c, "").Icon(iconHeart).IconOnly().Ghost().Tooltip(heartbeatTip)
+			heartbeatButton.Label("心动模式")
+			if box := heartbeatButton; a.heartbeat {
 				box.Color(theme.Primary)
 				if box.Clicked() {
 					a.toggleHeartbeat()
@@ -348,7 +369,9 @@ func (a *App) playerBar(c ui.C) {
 			} else if box.Clicked() {
 				a.toggleHeartbeat()
 			}
-			if ui.Button(c, "").Icon(iconLyrics).IconOnly().Ghost().Tooltip("歌词").Disabled(!hasSong).Clicked() {
+			lyricButton := ui.Button(c, "").Icon(iconLyrics).IconOnly().Ghost().Tooltip("歌词").Disabled(!hasSong)
+			lyricButton.Label("歌词")
+			if lyricButton.Clicked() {
 				if hasSong {
 					a.push(route{kind: routeLyrics, id: song.ID, title: song.Name})
 				}
@@ -393,7 +416,9 @@ func (a *App) playerBar(c ui.C) {
 			if snapshot.Muted || snapshot.Volume == 0 {
 				icon = iconMute
 			}
-			if ui.Button(c, "").Icon(icon).IconOnly().Ghost().Tooltip("静音").Clicked() {
+			mute := ui.Button(c, "").Icon(icon).IconOnly().Ghost().Tooltip("静音")
+			mute.Label("静音")
+			if mute.Clicked() {
 				a.toggleMute()
 			}
 			slider := ui.Slider(c, &a.volumeDrag).Range(0, 100).Step(1).Width(110)
@@ -447,10 +472,14 @@ func (a *App) queueSidebar(c ui.C) {
 		ui.Row(c).FillWidth().PadSides(16, 12, 12, 16).Gap(8).Items(ui.Center).Children(func() {
 			ui.Textf(c, "播放列表 (%d)", len(a.queue)).FontSize(13).Bold()
 			ui.Spacer(c)
-			if ui.Button(c, "").Icon(iconTrash).IconOnly().Ghost().Tooltip("清空列表").Clicked() {
+			clear := ui.Button(c, "").Icon(iconTrash).IconOnly().Ghost().Tooltip("清空列表")
+			clear.Label("清空播放列表")
+			if clear.Clicked() {
 				a.clearQueue()
 			}
-			if ui.Button(c, "").Icon(iconClose).IconOnly().Ghost().Tooltip("关闭").Clicked() {
+			closePanel := ui.Button(c, "").Icon(iconClose).IconOnly().Ghost().Tooltip("关闭")
+			closePanel.Label("关闭播放列表")
+			if closePanel.Clicked() {
 				a.queuePanel = false
 			}
 		})

@@ -57,7 +57,6 @@ func shoot(dir, suffix string, dark bool) {
 		a.SetThemeForShots("light")
 	}
 	page, config := a.Page(app.Config{Title: "网易云音乐", Width: 1160, Height: 740})
-	config.Invalidator = &app.Invalidator{}
 	session, err := headless.Open(config, nil, headless.Options{Scale: 1})
 	if err != nil {
 		log.Fatalf("%s: %v", suffix, err)

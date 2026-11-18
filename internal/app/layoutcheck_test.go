@@ -19,7 +19,6 @@ func TestLayoutReport(t *testing.T) {
 		a.ShowForShots(page)
 		a.SyncForShots()
 		_, config := a.Page(app.Config{Title: "t", Width: 1160, Height: 740})
-		config.Invalidator = &app.Invalidator{}
 		session, err := headless.Open(config, nil, headless.Options{Scale: 1})
 		if err != nil {
 			t.Fatal(err)

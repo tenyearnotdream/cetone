@@ -221,12 +221,15 @@ func (a *App) songRow(c ui.C, list songList, index int) {
 				if list.liked != nil && list.liked(index) {
 					icon = iconHeartFilled
 				}
-				if ui.Button(c, "").Icon(icon).IconOnly().XSmall().Ghost().Tooltip("收藏").Clicked() {
+				like := ui.Button(c, "").Icon(icon).IconOnly().XSmall().Ghost().Tooltip("收藏")
+				like.Label("收藏")
+				if like.Clicked() {
 					list.onLike(index)
 				}
 			}
 			if list.onMore != nil {
 				more := ui.Button(c, "").Icon(iconQueue).IconOnly().XSmall().Ghost().Tooltip("更多")
+				more.Label("更多操作")
 				ui.Menu(c, more, &a.rowMenuOpen, func(menu *ui.MenuItems) {
 					a.rowMenu(menu, list, index)
 				})

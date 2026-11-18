@@ -75,7 +75,8 @@ func (a *App) minePage(c ui.C) {
 // mineTile is one of the three special lists.
 func (a *App) mineTile(c ui.C, icon gfx.Icon, label string, count int, onClick func()) {
 	theme := c.Theme()
-	tile := ui.Row(c).Width(220).Pad(14).Gap(12).Radius(theme.Metrics.RadiusSurface).Background(theme.Card).Items(ui.Center)
+	tile := ui.Row(c).Width(220).Pad(14).Gap(12).Radius(theme.Metrics.RadiusSurface).
+		Background(theme.Card).Border(1, theme.Border).Items(ui.Center)
 	tile.Hit(ui.ID(c), label)
 	tile.Hover(ui.Look{}.Background(theme.Hover))
 	tile.Children(func() {
@@ -106,7 +107,9 @@ func (a *App) settingsPage(c ui.C) {
 					})
 					quality := a.config.PreferredQuality()
 					choices := ncm.Qualities()
-					if ui.Select(c, &quality, choices, ncm.Quality.String).Width(160).Changed() {
+					qualitySelect := ui.Select(c, &quality, choices, ncm.Quality.String).Width(160)
+					qualitySelect.Label("音质")
+					if qualitySelect.Changed() {
 						a.config.Quality = int(quality)
 						a.saveConfig()
 					}
@@ -142,7 +145,9 @@ func (a *App) settingsPage(c ui.C) {
 					themes := []string{"system", "light", "dark"}
 					labels := map[string]string{"system": "跟随系统", "light": "浅色", "dark": "深色"}
 					theme := a.config.Theme
-					if ui.Select(c, &theme, themes, func(t string) string { return labels[t] }).Width(160).Changed() {
+					themeSelect := ui.Select(c, &theme, themes, func(t string) string { return labels[t] }).Width(160)
+					themeSelect.Label("主题")
+					if themeSelect.Changed() {
 						a.config.Theme = theme
 						a.saveConfig()
 						a.invalidate()
@@ -267,10 +272,13 @@ func (a *App) settingsPage(c ui.C) {
 	})
 }
 
-// settingsCard is one titled group of settings.
+// settingsCard is one titled group of settings. The card is a surface with a
+// line around it: the theme's Card and Background are the same white in the
+// light theme, so the line is what makes the group read as a group.
 func (a *App) settingsCard(c ui.C, title string, body func()) {
 	theme := c.Theme()
-	ui.Column(c).FillWidth().Pad(16).Gap(12).Radius(theme.Metrics.RadiusSurface).Background(theme.Card).Children(func() {
+	ui.Column(c).FillWidth().Pad(16).Gap(12).Radius(theme.Metrics.RadiusSurface).
+		Background(theme.Card).Border(1, theme.Border).Children(func() {
 		ui.Text(c, title).FontSize(14).Weight(gfx.WeightMedium)
 		body()
 	})

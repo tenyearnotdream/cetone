@@ -278,6 +278,13 @@ func (t *track) run() {
 			return
 		}
 		if !restart {
+			// A stop leaves the source unfinished: its last frames were not
+			// played, so it is neither promoted to the cache nor reported as
+			// ended. Reporting an end here would advance the queue when the user
+			// paused or skipped, which is the opposite of what they asked for.
+			if t.stopping() {
+				return
+			}
 			// End of the source: keep a finished stream as the cache entry.
 			t.promote()
 			t.engine.finished(t)
@@ -421,6 +428,16 @@ func (t *track) promote() {
 	}
 	if err := os.Rename(part, t.source.CachePath); err == nil && t.engine.OnCacheWritten != nil {
 		t.engine.OnCacheWritten()
+	}
+}
+
+// stopping reports that the session was closed rather than reaching its end.
+func (t *track) stopping() bool {
+	select {
+	case <-t.stop:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -702,8 +719,15 @@ func (e *Engine) positionLocked() time.Duration {
 	return e.pos + estimate
 }
 
-// serveLocked records that a track is now audible.
+// serveLocked records that a track is now audible. A track the engine has let go
+// of (Pause, Stop, a replacement) must not resurrect the status: its goroutine
+// can still be between a seek's restart and the next read when Close reaches it,
+// and a stale write there would leave the engine reporting playback with no
+// device open and no way to pause it.
 func (e *Engine) serveLocked(status Status, t *track) {
+	if e.track != t {
+		return
+	}
 	e.status = status
 	e.anchorAt = time.Now()
 	e.anchorFrame = t.submitted.Load()
@@ -764,7 +788,8 @@ func (e *Engine) fail(t *track, err error) {
 
 func (e *Engine) finished(t *track) {
 	e.mu.Lock()
-	if e.track == t {
+	owned := e.track == t
+	if owned {
 		e.track = nil
 		e.status = StatusStopped
 		if e.duration > 0 {
@@ -772,6 +797,9 @@ func (e *Engine) finished(t *track) {
 		}
 	}
 	e.mu.Unlock()
+	if !owned {
+		return
+	}
 	e.notify()
 	if e.OnFinish != nil {
 		e.OnFinish()

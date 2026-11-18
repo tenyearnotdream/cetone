@@ -216,8 +216,10 @@ func New(paths store.Paths) (*App, error) {
 // ----- the window -----
 
 // Page builds the page and its window config, for a test that drives it with
-// no window. The config's Invalidator is the one workers wake, so a page built
-// here behaves exactly as the one Run opens.
+// no window. The returned config already carries the Invalidator workers wake,
+// and the application holds that same value: replacing config.Invalidator with
+// a fresh one afterwards would leave the application waking an invalidator no
+// window listens to, and a worker's result would never be painted.
 func (a *App) Page(base app.Config) (*ui.Page, app.Config) {
 	theme, follow := a.themeConfig()
 	page := ui.NewPage(ui.PageConfig{View: a.page, Theme: theme, FollowSystemTheme: follow})
@@ -310,10 +312,13 @@ func (a *App) notifyLater(title, body string) {
 	a.work.push(func() { a.toast(title, body, ui.ToastDefault) })
 }
 
-// toast shows a message in the window's corner.
+// toast shows a message in the window's corner. It asks for the repaint itself:
+// the Toaster only queues a toast, and a caller that showed one from a key
+// handler or a worker may not be followed by a paint for any other reason.
 func (a *App) toast(title, body string, kind ui.ToastKind) {
 	a.toaster.Show(title, body, kind)
 	a.toastSeq++
+	a.invalidate()
 }
 
 // errText is what a failed request says to a user.
