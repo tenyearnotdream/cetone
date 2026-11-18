@@ -110,28 +110,12 @@ func (a *App) ShowForShots(page string) {
 	}
 }
 
-// fixtureQR is a stand-in module grid, so the login panel can be looked at
-// without asking the server for a code.
+// fixtureQR is a real QR code for a placeholder login URL, so a screenshot
+// shows the login panel as it looks with a code the server issued.
 func fixtureQR() []qrModule {
-	const size = 25
-	modules := make([]qrModule, 0, 200)
-	// Three finder patterns and a sprinkle of data modules: enough to judge the
-	// panel's geometry, not a scannable code.
-	for _, corner := range [][2]int{{0, 0}, {size - 7, 0}, {0, size - 7}} {
-		for y := 0; y < 7; y++ {
-			for x := 0; x < 7; x++ {
-				border := x == 0 || y == 0 || x == 6 || y == 6
-				core := x >= 2 && x <= 4 && y >= 2 && y <= 4
-				if border || core {
-					modules = append(modules, qrModule{X: corner[0] + x, Y: corner[1] + y, Size: size})
-				}
-			}
-		}
-	}
-	for y := 9; y < size-1; y += 3 {
-		for x := 9; x < size-1; x += 2 {
-			modules = append(modules, qrModule{X: x, Y: y, Size: size})
-		}
+	modules, err := qrModules("https://music.163.com/login?codekey=fixture-unikey-for-screenshots")
+	if err != nil {
+		return nil
 	}
 	return modules
 }

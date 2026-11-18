@@ -48,6 +48,8 @@ GTK 版最有价值的一点：**会员期内缓存下来的歌曲，在会员�
 | 发现（深色） | 歌词 |
 | ![](docs/screenshots/settings-dark.png) | ![](docs/screenshots/queue-light.png) |
 | 设置（深色） | 播放列表 |
+| ![](docs/screenshots/login-light.png) | |
+| 扫码登录（真实二维码编码） | |
 
 截图由 `make shots` 无窗口渲染，因此不依赖显示器；其中的“发现（真实接口数据）”
 一张来自 `internal/app` 的 live 测试，用的是真实 API 的返回。
