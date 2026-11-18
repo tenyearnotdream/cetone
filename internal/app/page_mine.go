@@ -135,6 +135,45 @@ func (a *App) settingsPage(c ui.C) {
 				})
 			})
 
+			// The status item and background running.
+			a.settingsCard(c, "系统托盘", func() {
+				ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
+					ui.Column(c).Gap(2).Grow(1).Children(func() {
+						ui.Text(c, "关闭窗口时最小化到托盘").FontSize(13)
+						switch {
+						case a.trayAvailable:
+							ui.Text(c, "关闭窗口后音乐继续播放；从托盘菜单可以打开窗口或退出").FontSize(11).Muted()
+						case a.trayUnavailable:
+							ui.Text(c, "当前桌面没有可用的状态栏区域，关闭窗口会直接退出").FontSize(11).Muted()
+						default:
+							ui.Text(c, a.trayProblemText()).FontSize(11).Muted()
+						}
+					})
+					closeToTray := a.config.CloseToTray
+					toggle := ui.Switch(c, &closeToTray, "").Label("关闭窗口时最小化到托盘")
+					toggle.Disabled(!a.trayAvailable)
+					if toggle.Changed() {
+						a.config.CloseToTray = closeToTray
+						a.saveConfig()
+						a.invalidate()
+					}
+				})
+				if a.trayAvailable {
+					ui.Divider(c)
+					ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
+						ui.Column(c).Gap(2).Grow(1).Children(func() {
+							ui.Text(c, "托盘菜单").FontSize(13)
+							ui.Text(c, "包含上一首 / 播放暂停 / 下一首、显示或隐藏窗口，以及退出").FontSize(11).Muted()
+						})
+						if ui.Button(c, "隐藏到托盘").Outline().Clicked() {
+							if a.window != nil && !a.window.Closed() {
+								a.window.Hide()
+							}
+						}
+					})
+				}
+			})
+
 			// Appearance.
 			a.settingsCard(c, "外观", func() {
 				ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
@@ -270,6 +309,15 @@ func (a *App) settingsPage(c ui.C) {
 			})
 		})
 	})
+}
+
+// trayProblemText is what the settings page says when the status item could not
+// be created for a reason other than the desktop having no status area.
+func (a *App) trayProblemText() string {
+	if a.trayErr != nil {
+		return "状态栏图标创建失败：" + a.trayErr.Error()
+	}
+	return "正在创建状态栏图标…"
 }
 
 // settingsCard is one titled group of settings. The card is a surface with a

@@ -106,11 +106,19 @@ type App struct {
 
 	// resumeAt is the position a restored queue should continue from.
 	resumeAt time.Duration
-	// window, application and the MPRIS server are the desktop integration.
+	// window, application, the status item and the MPRIS server are the desktop
+	// integration.
 	window        *app.Window
 	application   *app.Application
 	mprisServer   mprisServer
 	quitRequested bool
+	// tray is the status item, when the desktop has a status area for one.
+	tray          *app.StatusItem
+	trayAvailable bool
+	// trayUnavailable is set when the desktop reported that it has no status
+	// area, which is a normal machine, not a failure to report.
+	trayUnavailable bool
+	trayErr         error
 	// toastSeq counts the toasts this run showed, for tests.
 	toastSeq int
 	// now is the animation clock of the last paint, kept for the player bar's

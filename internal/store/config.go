@@ -31,6 +31,10 @@ type Config struct {
 	CacheDirs []string `json:"cacheDirs"`
 	// KeepAwake asks the desktop to stay awake while music plays.
 	KeepAwake bool `json:"keepAwake"`
+	// CloseToTray hides the window instead of quitting when it is closed, so
+	// the music keeps playing and the status item can bring it back. It needs a
+	// desktop with a status area; without one the window closes as usual.
+	CloseToTray bool `json:"closeToTray"`
 	// SearchHistory is the last handful of searches, newest first.
 	SearchHistory []string `json:"searchHistory"`
 }
@@ -52,6 +56,7 @@ func DefaultConfig() Config {
 		Theme:            "system",
 		IgnoreUnplayable: true,
 		KeepAwake:        true,
+		CloseToTray:      true,
 	}
 }
 

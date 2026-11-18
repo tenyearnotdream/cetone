@@ -89,6 +89,7 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 				a.playing = true
 				a.noteCachedQuality(song.ID, cachedQuality)
 				a.updateMPRIS()
+				a.updateTray()
 			})
 			a.invalidate()
 			return
@@ -159,6 +160,8 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		}
 		a.noteCachedQuality(song.ID, resolved.Quality)
 		a.updateMPRIS()
+		a.updateTray()
+		a.updateTray()
 	})
 	a.invalidate()
 }
@@ -254,6 +257,7 @@ func (a *App) togglePlay() {
 		}
 	}
 	a.updateMPRIS()
+	a.updateTray()
 }
 
 // advance moves the cursor by delta, honouring the repeat mode, and starts the

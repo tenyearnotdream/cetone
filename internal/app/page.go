@@ -22,16 +22,34 @@ func Run(base app.Config, paths store.Paths) error {
 	}
 	return app.RunApplication(func(application *app.Application) error {
 		_, config := a.Page(base)
-		config.OnClosed = application.Quit
+		a.application = application
+		// Closing the window hides it when there is a status item to come back
+		// from; otherwise it quits, as any window does.
+		config.OnCloseRequest = a.handleCloseRequest
+		// Work published by a worker or by a tray menu is applied here as well as
+		// in the page: a hidden window is not painted, so the page's own drain
+		// never runs, and a tray action while hidden would otherwise sit in the
+		// queue until something else showed the window.
+		config.OnWake = a.sync
+		config.OnClosed = func() {
+			a.stopTray()
+			a.stopMPRIS()
+			application.Quit()
+		}
 		window, err := application.OpenWindow(config, new(gfx.Canvas))
 		if err != nil {
 			return err
 		}
 		a.window = window
-		a.application = application
 		a.inv = config.Invalidator
+		// The status item is added after the window exists, so the first press
+		// on it has somewhere to show.
+		a.startTray()
 		a.startMPRIS()
 		a.restoreQueue()
+		if a.trayErr != nil {
+			a.toast("状态栏图标不可用", a.trayErr.Error(), ui.ToastWarning)
+		}
 		return nil
 	})
 }
