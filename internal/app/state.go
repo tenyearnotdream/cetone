@@ -38,6 +38,11 @@ type App struct {
 	client *ncm.Client
 	engine *player.Engine
 
+	// resolveURL is the client's URL endpoint. It is a field so a test can serve
+	// a stream without the API, and so the one call that decides whether a song
+	// is a full track or a trial has a single place to be exercised from.
+	resolveURL func(ctx context.Context, ids []int64, quality ncm.Quality) ([]ncm.SongURL, error)
+
 	config store.Config
 	user   ncm.UserInfo
 
@@ -197,6 +202,7 @@ func New(paths store.Paths) (*App, error) {
 	}
 
 	a.cached = newCacheIndex(a.cache)
+	a.resolveURL = a.client.SongURLs
 	a.engine = player.NewEngine()
 	a.engine.SetVolume(config.Volume)
 	a.engine.SetMuted(config.Muted)

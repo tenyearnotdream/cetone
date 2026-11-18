@@ -64,9 +64,19 @@ func LegacyGTKDataDir() string {
 // LegacyLyricsDir is the GTK client's lyric directory (~/.lyrics).
 func LegacyLyricsDir() string { return filepath.Join(homeDir(), ".lyrics") }
 
-// Ensure creates the directories the application writes to.
+// Ensure creates every directory the application writes to: the configuration
+// and session files, the audio cache, and the lyric and cover caches. A
+// directory missing here is a first play that cannot write its file.
 func (p Paths) Ensure() error {
-	for _, dir := range []string{p.Config, p.Data, p.Cache, filepath.Join(p.Cache, "lyrics"), filepath.Join(p.Cache, "covers")} {
+	directories := []string{
+		p.Config,
+		p.Data,
+		p.Cache,
+		filepath.Join(p.Cache, "music"),
+		filepath.Join(p.Cache, "lyrics"),
+		filepath.Join(p.Cache, "covers"),
+	}
+	for _, dir := range directories {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("store: create %s: %w", dir, err)
 		}

@@ -96,9 +96,16 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		cacheNote = "缓存文件无法解码，改为在线播放"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The request has its own deadline; the playback session must not: it outlives
+	// this function, and cancelling it here would end the download mid-song, which
+	// the decoder would read as the end of the track.
+	requestCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	urls, err := a.client.SongURLs(ctx, []int64{song.ID}, quality)
+	resolve := a.resolveURL
+	if resolve == nil {
+		resolve = a.client.SongURLs
+	}
+	urls, err := resolve(requestCtx, []int64{song.ID}, quality)
 	if err != nil || len(urls) == 0 || urls[0].URL == "" {
 		reason := firstNonEmpty(errText(err), "该歌曲当前不可播放（可能版权或会员限制）")
 		a.work.push(func() {
@@ -120,13 +127,21 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 	a.engine.SetVolume(volume)
 	a.engine.SetMuted(muted)
 	source := player.Source{
-		Title:     song.Name,
-		Stream:    resolved.URL,
-		Duration:  song.Duration,
-		CachePath: a.cache.Path(song.ID, resolved.Quality),
-		Header:    http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
+		Title:    song.Name,
+		Stream:   resolved.URL,
+		Duration: song.Duration,
+		Header:   http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
 	}
-	if err := a.engine.Play(ctx, source); err != nil {
+	// A trial fragment is not the song. Writing one to the cache would put a
+	// thirty-second clip where the full track belongs, and every later play would
+	// come from it, so it plays and is not kept.
+	cacheable := cacheableStream(song, resolved)
+	if cacheable {
+		source.CachePath = a.cache.Path(song.ID, resolved.Quality)
+	}
+	// The session's context is the engine's own: Close and a replacement cancel
+	// it, and nothing else does.
+	if err := a.engine.Play(context.Background(), source); err != nil {
 		message := errText(err)
 		a.work.push(func() { a.toast("无法播放", message, ui.ToastError) })
 		a.invalidate()
@@ -139,11 +154,41 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		a.playing = true
 		if cacheNote != "" {
 			a.toast("缓存文件已损坏", cacheNote, ui.ToastWarning)
+		} else if !cacheable {
+			a.toast("仅可试听", song.Name+"：当前账户只能播放试听片段，未写入缓存", ui.ToastWarning)
 		}
 		a.noteCachedQuality(song.ID, resolved.Quality)
 		a.updateMPRIS()
 	})
 	a.invalidate()
+}
+
+// cacheableStream reports whether the bytes behind a resolved URL are the whole
+// song rather than a trial fragment.
+//
+// The API answers a song the account may not stream with a short preview and
+// FreeTrial set; it can also answer a full URL whose size is far below what the
+// duration implies (a truncated answer). Either one written to the cache would
+// replace the song on disk with a clip, which is worse than not caching at all:
+// the client would then play the clip forever and call it the offline copy.
+func cacheableStream(song ncm.Song, resolved ncm.SongURL) bool {
+	if resolved.FreeTrial {
+		return false
+	}
+	// The GTK client's own rule: a VIP preview runs about thirty seconds, and a
+	// song shorter than that is not worth a cache entry anyway.
+	if song.Duration < 30*time.Second {
+		return false
+	}
+	// A size far below the shortest plausible bit rate for the length is a
+	// fragment, whatever the flags say: 64 kb/s is the floor this client trusts.
+	if resolved.Size > 0 {
+		minimum := int64(song.Duration.Seconds() * 64_000 / 8)
+		if resolved.Size < minimum/2 {
+			return false
+		}
+	}
+	return true
 }
 
 // songQuality is the tier to ask for: the one picked for this song, else the

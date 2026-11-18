@@ -1,10 +1,13 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -406,5 +409,107 @@ func TestTheSeekSliderMovesTheTransport(t *testing.T) {
 	position := a.engine.Snapshot().Position
 	if position < 900*time.Millisecond || position > 1400*time.Millisecond {
 		t.Fatalf("after seeking to 1s the position is %v", position)
+	}
+}
+
+// A trial fragment must never be written to the cache: it would replace the song
+// on disk with a thirty-second clip, and every later play would come from it.
+func TestATrialFragmentIsNotCached(t *testing.T) {
+	song := ncm.Song{ID: 1, Name: "VIP song", Duration: 4 * time.Minute}
+	// What the API answers an account that may not stream the song: a short
+	// preview with FreeTrial set.
+	trial := ncm.SongURL{ID: 1, URL: "https://example.invalid/a.mp3", Size: 481115, FreeTrial: true, Quality: ncm.QualityStandard}
+	if cacheableStream(song, trial) {
+		t.Fatal("a trial fragment was accepted for the cache")
+	}
+	// A full answer for the same song is cached.
+	full := ncm.SongURL{ID: 1, URL: "https://example.invalid/a.mp3", Size: 6400000, Quality: ncm.QualityStandard}
+	if !cacheableStream(song, full) {
+		t.Fatal("a full song was refused the cache")
+	}
+	// A size that cannot be the whole song is a fragment even without the flag.
+	truncated := ncm.SongURL{ID: 1, URL: "https://example.invalid/a.mp3", Size: 100000, Quality: ncm.QualityStandard}
+	if cacheableStream(song, truncated) {
+		t.Fatal("a 100 kB answer for a four-minute song was cached")
+	}
+	// A very short song is not worth a cache entry, as the GTK client decided.
+	short := ncm.Song{ID: 2, Name: "jingle", Duration: 12 * time.Second}
+	if cacheableStream(short, ncm.SongURL{Size: 100000}) {
+		t.Fatal("a twelve-second song was cached")
+	}
+}
+
+// A real trial answer from the API does not leave a file behind, and the window
+// says why.
+func TestPlayingATrialLeavesTheCacheEmpty(t *testing.T) {
+	a := testApp(t)
+	song := ncm.Song{ID: 77, Name: "VIP song", Duration: 4 * time.Minute, Fee: 1}
+	resolved := ncm.SongURL{ID: 77, URL: "https://example.invalid/a.mp3", Size: 481115, FreeTrial: true, Quality: ncm.QualityExtreme}
+	if cacheableStream(song, resolved) {
+		t.Fatal("the fixture is meant to be a trial")
+	}
+	// Nothing was written, so a lookup finds nothing and the next play streams
+	// rather than serving a clip.
+	if _, _, ok := a.cache.Lookup(song.ID, a.config.PreferredQuality()); ok {
+		t.Fatal("a trial fragment was found in the cache")
+	}
+}
+
+// slowStream serves a wav fixture in throttled chunks.
+func slowStream(t *testing.T, seconds float64) *httptest.Server {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.wav")
+	writeTestWav(t, path, 8000, 2, seconds)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		const chunks = 30
+		step := len(data)/chunks + 1
+		for offset := 0; offset < len(data); offset += step {
+			end := min(offset+step, len(data))
+			if _, err := w.Write(data[offset:end]); err != nil {
+				return
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// A song resolved from the API keeps playing after the resolution returns. The
+// regression: the request's own context reached the playback session, so the
+// deferred cancel ended the download, the decoder read that as the end of the
+// track, and the partial file became the cache entry.
+func TestPlaybackOutlivesTheResolutionRequest(t *testing.T) {
+	a := testApp(t)
+	server := slowStream(t, 4)
+	a.resolveURL = func(ctx context.Context, ids []int64, quality ncm.Quality) ([]ncm.SongURL, error) {
+		return []ncm.SongURL{{
+			ID:      5,
+			URL:     server.URL,
+			Size:    900_000,
+			Quality: ncm.QualityExtreme,
+		}}, nil
+	}
+	song := ncm.Song{ID: 5, Name: "streamed", Duration: 4 * time.Second}
+	a.queue = []ncm.Song{song}
+	a.queueAt = 0
+	a.resolveAndPlay(song)
+
+	waitFor(t, a, func() bool { return a.engine.Snapshot().Position > 500*time.Millisecond })
+	snapshot := a.engine.Snapshot()
+	if snapshot.Status.String() != "playing" {
+		t.Fatalf("the song stopped after its request returned: %v (%s)", snapshot.Status, snapshot.Error)
+	}
+	if got := a.engine.Snapshot().Position; got < 500*time.Millisecond {
+		t.Fatalf("the song advanced to %v only", got)
 	}
 }

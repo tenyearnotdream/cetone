@@ -136,6 +136,10 @@ type track struct {
 	closer io.Closer
 	dl     *download
 
+	// ctx is the session's own context: its cancellation stops the session the
+	// way Close does, without reporting an end of song.
+	ctx context.Context
+
 	mu        sync.Mutex
 	dec       decoder
 	sink      Sink
@@ -148,6 +152,9 @@ type track struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	release  sync.Once
+	// promoted reports that the finished transfer already became the cache
+	// entry, so the rename happens once.
+	promoted atomic.Bool
 
 	// finishedOnce guards the end-of-source report.
 	finishedOnce sync.Once
@@ -158,6 +165,7 @@ func newTrack(ctx context.Context, e *Engine, source Source, at time.Duration) (
 	t := &track{
 		engine: e,
 		source: source,
+		ctx:    ctx,
 		at:     at,
 		seekCh: make(chan time.Duration, 1),
 		stop:   make(chan struct{}),
@@ -191,6 +199,11 @@ func newTrack(ctx context.Context, e *Engine, source Source, at time.Duration) (
 			tail.Close()
 			return dl.Close()
 		})
+	}
+	// A stream is promoted as soon as it has arrived, without waiting for the
+	// song to end.
+	if t.dl != nil && source.CachePath != "" {
+		go t.promoteCache()
 	}
 	dec, err := openDecoder(t.reader)
 	if err != nil {
@@ -272,21 +285,22 @@ func (t *track) run() {
 		t.engine.mu.Unlock()
 		t.engine.notify()
 
-		restart, err := t.pump(dec, sink)
+		outcome, err := t.pump(dec, sink)
 		if err != nil {
 			t.engine.fail(t, err)
 			return
 		}
-		if !restart {
+		switch outcome {
+		case pumpStopped:
 			// A stop leaves the source unfinished: its last frames were not
 			// played, so it is neither promoted to the cache nor reported as
 			// ended. Reporting an end here would advance the queue when the user
 			// paused or skipped, which is the opposite of what they asked for.
-			if t.stopping() {
-				return
-			}
-			// End of the source: keep a finished stream as the cache entry.
-			t.promote()
+			return
+		case pumpEnded:
+			// End of the source. A stream that finished arriving was already
+			// promoted the moment it did; this covers the last few bytes.
+			t.promoteCache()
 			t.engine.finished(t)
 			return
 		}
@@ -318,9 +332,22 @@ func (t *track) run() {
 	}
 }
 
-// pump reads, applies the volume, and writes. It returns restart=true for a
-// seek and restart=false at the end of the source.
-func (t *track) pump(dec decoder, sink Sink) (bool, error) {
+// pumpOutcome is how one pass over the source ended.
+type pumpOutcome int
+
+const (
+	// pumpEnded is the source reaching its last frame.
+	pumpEnded pumpOutcome = iota
+	// pumpRestart is a seek: the decoder starts again at its new position.
+	pumpRestart
+	// pumpStopped is the session being closed or its context cancelled. It is
+	// not the end of the song, and must not move the queue on.
+	pumpStopped
+)
+
+// pump reads, applies the volume, and writes until the source ends, the session
+// stops, or a seek asks for a restart.
+func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 	frameSize := t.format.FrameSize()
 	bytesPerSecond := t.format.SampleRate * frameSize
 	// A tenth of a second per write keeps a pause, a seek and the position
@@ -345,9 +372,11 @@ func (t *track) pump(dec decoder, sink Sink) (bool, error) {
 			t.engine.anchorFrame = t.submitted.Load()
 			t.engine.mu.Unlock()
 			t.mu.Unlock()
-			return true, nil
+			return pumpRestart, nil
 		case <-t.stop:
-			return false, nil
+			return pumpStopped, nil
+		case <-t.ctx.Done():
+			return pumpStopped, nil
 		default:
 		}
 
@@ -359,16 +388,18 @@ func (t *track) pump(dec decoder, sink Sink) (bool, error) {
 			if n > 0 && sink != nil {
 				if _, werr := sink.Write(pcm); werr != nil {
 					if errors.Is(werr, os.ErrClosed) {
-						return false, nil
+						return pumpStopped, nil
 					}
-					return false, werr
+					return pumpStopped, werr
 				}
 			} else if n > 0 {
 				// No device: keep real time so the position stays honest.
 				wait := time.Duration(float64(n) / float64(bytesPerSecond) * float64(time.Second))
 				select {
 				case <-t.stop:
-					return false, nil
+					return pumpStopped, nil
+				case <-t.ctx.Done():
+					return pumpStopped, nil
 				case <-time.After(wait):
 				}
 			}
@@ -380,13 +411,15 @@ func (t *track) pump(dec decoder, sink Sink) (bool, error) {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return false, nil
+			switch {
+			case errors.Is(err, io.EOF):
+				return pumpEnded, nil
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				// The session's context ended: the transfer was cancelled, which
+				// is a stop, not a song that reached its last frame.
+				return pumpStopped, nil
 			}
-			if errors.Is(err, context.Canceled) {
-				return false, nil
-			}
-			return false, err
+			return pumpStopped, err
 		}
 	}
 }
@@ -408,25 +441,40 @@ func (t *track) seek(at time.Duration) {
 	}
 }
 
-// promote moves a finished transfer into its cache name.
-func (t *track) promote() {
+// promoteCache moves a finished transfer into its cache name while the session
+// keeps reading it, so the song is in the cache seconds after it arrives rather
+// than at the end of the track: a user who quits halfway keeps what was
+// downloaded.
+//
+// Only a transfer that delivered exactly what the server promised is promoted. A
+// partial file renamed into the cache would be played as the song from then on,
+// which is worse than caching nothing.
+//
+// Renaming a file that is open for reading keeps the handle valid on the
+// platforms this client targets, so the reader continues on the same bytes.
+func (t *track) promoteCache() {
 	if t.dl == nil || t.source.CachePath == "" {
 		return
 	}
-	if !t.dl.waitDone(5 * time.Second) {
+	if !t.dl.waitDone(30 * time.Minute) {
 		return
 	}
-	part := t.dl.path
-	t.mu.Lock()
-	if t.closer != nil {
-		t.closer.Close()
-		t.closer = nil
+	if !t.dl.complete() {
+		return
 	}
-	t.mu.Unlock()
+	if t.promoted.Swap(true) {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(t.source.CachePath), 0o755); err != nil {
 		return
 	}
-	if err := os.Rename(part, t.source.CachePath); err == nil && t.engine.OnCacheWritten != nil {
+	if err := os.Rename(t.dl.path, t.source.CachePath); err != nil {
+		return
+	}
+	// The finished file now lives at its cache name; the session's Close must not
+	// think the transfer was abandoned and delete it.
+	t.dl.keep.Store(true)
+	if t.engine.OnCacheWritten != nil {
 		t.engine.OnCacheWritten()
 	}
 }

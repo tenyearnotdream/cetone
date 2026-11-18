@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,9 @@ type download struct {
 
 	written atomic.Int64
 	size    atomic.Int64
+	// keep reports that the transfer's bytes now live at their final name, so
+	// Close must not delete them.
+	keep atomic.Bool
 
 	mu     sync.Mutex
 	done   bool
@@ -43,6 +47,14 @@ type download struct {
 // startDownload opens the .part file and begins fetching. It returns before
 // any byte has arrived; tailFile and waitDone observe progress.
 func startDownload(parent context.Context, client *http.Client, rawURL, path string, header http.Header) (*download, error) {
+	// The first play of a song creates its cache directory: a fresh install has
+	// none, and a download that cannot open its file would otherwise turn every
+	// streamed song into "cannot play".
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
@@ -95,11 +107,24 @@ func (d *download) run(ctx context.Context) {
 			d.written.Add(int64(n))
 		}
 		if readErr != nil {
-			if readErr != io.EOF && ctx.Err() == nil {
-				fail(readErr)
-			}
 			d.mu.Lock()
-			d.done = true
+			switch {
+			case readErr == io.EOF:
+				// A transfer that ends by itself is complete only when it
+				// delivered what the server promised; a truncated answer is not
+				// the song and must never become the cache entry.
+				if expected := d.size.Load(); expected > 0 && d.written.Load() < expected {
+					d.err = fmt.Errorf("player: download ended after %d of %d bytes", d.written.Load(), expected)
+				} else {
+					d.done = true
+				}
+			case ctx.Err() != nil:
+				// Cancelled: the session was closed or replaced. Not an error the
+				// user sees, and not a finished file.
+				d.err = context.Canceled
+			default:
+				d.err = readErr
+			}
 			d.mu.Unlock()
 			return
 		}
@@ -126,11 +151,17 @@ func (d *download) waitDone(timeout time.Duration) bool {
 	}
 }
 
-// complete reports a finished, successful transfer.
+// complete reports a finished, successful transfer: every promised byte arrived.
 func (d *download) complete() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.done && d.err == nil
+	if !d.done || d.err != nil {
+		return false
+	}
+	if expected := d.size.Load(); expected > 0 && d.written.Load() < expected {
+		return false
+	}
+	return true
 }
 
 // progress reports bytes written and the expected total (0 when unknown).
@@ -153,7 +184,7 @@ func (d *download) Close() error {
 	}
 	d.cancel()
 	err := d.file.Close()
-	if !d.complete() {
+	if !d.complete() && !d.keep.Load() {
 		os.Remove(d.path)
 	}
 	return err
