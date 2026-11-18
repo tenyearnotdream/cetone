@@ -7,7 +7,7 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // The pieces every page composes: a card, a song row, an empty state, a cover

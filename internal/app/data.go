@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // pageData is what the pages loaded, one struct per kind of page. It lives in

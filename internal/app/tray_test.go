@@ -12,7 +12,7 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	"ncmviva/internal/player"
+	"cetone/internal/player"
 )
 
 func TestTrayMenuDescribesTheSong(t *testing.T) {

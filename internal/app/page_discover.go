@@ -6,7 +6,7 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // discoverPage is 发现: the daily playlists, the new albums and the personal

@@ -1,7 +1,7 @@
-# The project builds with the Go toolchain and the viva command, which go.mod
-# pins as a tool, so `go tool viva` needs no separate install.
+# Cetone builds with the Go toolchain and the viva command, which go.mod pins as
+# a tool, so `go tool viva` needs no separate install.
 
-.PHONY: all build test vet run package shots clean
+.PHONY: all build test vet run package shots icons install-icons clean
 
 all: vet test build
 
@@ -30,6 +30,19 @@ shots:
 # The live checks reach the network and the sound card, so they are opt-in.
 live:
 	go test ./internal/ncm ./internal/player -tags live -count=1
+
+# The icon set the desktop picks from, for a manual install.
+ICON_SIZES := 16 22 24 32 48 64 96 128 256 512 1024
+
+icons:
+	python3 tools/makeicon.py
+
+install-icons:
+	for size in $(ICON_SIZES); do \
+		install -Dm644 icons/hicolor/$${size}x$${size}/apps/cetone.png \
+			/usr/share/icons/hicolor/$${size}x$${size}/apps/cetone.png; \
+	done
+	gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
 
 clean:
 	rm -rf build

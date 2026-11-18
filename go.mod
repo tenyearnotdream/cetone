@@ -1,4 +1,4 @@
-module ncmviva
+module cetone
 
 go 1.26.0
 

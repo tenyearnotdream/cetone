@@ -4,7 +4,7 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // minePage is 我的音乐: the account's playlists, and the three lists that are
@@ -303,7 +303,7 @@ func (a *App) settingsPage(c ui.C) {
 				ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
 					ui.Column(c).Gap(2).Grow(1).Children(func() {
 						ui.Text(c, "关于").FontSize(13)
-						ui.Text(c, "ncmviva · Go + Viva 重写的网易云音乐客户端 · GPL-3.0").FontSize(11).Muted()
+						ui.Text(c, "Cetone · 基于 Go + Viva 重写的网易云音乐客户端 · GPL-3.0").FontSize(11).Muted()
 					})
 				})
 			})

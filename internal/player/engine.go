@@ -183,7 +183,7 @@ func newTrack(ctx context.Context, e *Engine, source Source, at time.Duration) (
 		}
 		part := source.CachePath + ".part"
 		if source.CachePath == "" {
-			part = filepath.Join(os.TempDir(), fmt.Sprintf("ncmviva-%d.part", time.Now().UnixNano()))
+			part = filepath.Join(os.TempDir(), fmt.Sprintf("cetone-%d.part", time.Now().UnixNano()))
 		}
 		dl, err := startDownload(ctx, e.HTTP, source.Stream, part, source.Header)
 		if err != nil {

@@ -1,4 +1,4 @@
-# ncmviva
+# Cetone
 
 用 **Go + [Viva](https://vivaui.dev)** 重写的网易云音乐 Linux 桌面客户端，参照
 [netease-cloud-music-gtk](https://github.com/gmg137/netease-cloud-music-gtk) 的功能范围。
@@ -65,6 +65,22 @@ GTK 版最有价值的一点：**会员期内缓存下来的歌曲，在会员�
 截图由 `make shots` 无窗口渲染，因此不依赖显示器；其中的“发现（真实接口数据）”
 一张来自 `internal/app` 的 live 测试，用的是真实 API 的返回。
 
+## 图标
+
+应用图标是画好的 1024×1024 原图（`artwork/icon-source.png`）。原图四角是白色
+（整张是 RGB、没有透明通道），直接当图标会在窗口和托盘上露出一圈白边。所以
+`make icons`（即 `tools/makeicon.py`）会：
+
+1. 从画布边缘泛洪填充连通的白底，只去掉**外部**背景，图形内部的白色高光保留；
+2. 边缘那圈抗锯齿像素按覆盖率反解出 alpha 并还原形状颜色，不是简单二值化，
+   否则会留白边或锯齿；
+3. 以**预乘 alpha** 缩放到 16/22/24/32/48/64/96/128/256/512/1024 各尺寸，
+   避免缩小后在透明边缘出现暗边；
+4. 输出 `data/icon.png`（打包用）、`internal/assets/icon.png`（内嵌，窗口与托盘用）
+   以及 `icons/hicolor/*/apps/cetone.png`。
+
+`make install-icons` 会把整套图标装到 `/usr/share/icons/hicolor` 并刷新缓存。
+
 ## 目录结构
 
 ```
@@ -83,7 +99,7 @@ cmd/shots/                 无窗口渲染各页面的开发工具（-tags vivas
 go build ./...          # 编译
 go test ./... -count=1  # 无窗口的端到端测试（真实页面、绘制、输入路由）
 viva vet                # 检查“能编译但画错”的页面写法
-viva build              # 发布版程序 build/ncmviva
+viva build              # 发布版程序 build/cetone
 viva package --target linux   # 打包 tar.gz / deb
 ```
 
@@ -94,10 +110,13 @@ viva package --target linux   # 打包 tar.gz / deb
 
 | 内容 | 路径 |
 | --- | --- |
-| 设置、会话、播放队列 | `~/.config/ncmviva/` |
-| 音频缓存（新） | `~/.cache/ncmviva/music/` |
-| 歌词、封面缓存 | `~/.cache/ncmviva/lyrics|/covers/` |
+| 设置、会话、播放队列 | `~/.config/cetone/` |
+| 音频缓存（新） | `~/.cache/cetone/music/` |
+| 歌词、封面缓存 | `~/.cache/cetone/lyrics|/covers/` |
 | 旧 GTK 版缓存（只读） | `~/.cache/netease-cloud-music-gtk4/` |
+
+程序改名前用的目录（`~/.config/ncmviva` 等）会在首次启动时**自动迁移**到新名字下，
+离线曲库、登录态和设置都不会丢；如果新旧目录同时存在，以新目录为准，旧目录原样保留。
 
 ## 已知限制
 

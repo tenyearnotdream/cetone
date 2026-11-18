@@ -4,8 +4,8 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/player"
+	"cetone/internal/ncm"
+	"cetone/internal/player"
 )
 
 // The status value the transport compares against, kept out of the pages so a

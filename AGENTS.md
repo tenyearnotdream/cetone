@@ -1,4 +1,4 @@
-# ncmviva
+# Cetone
 
 A desktop application built with Viva (Go, drawn on the GPU, no web view). This file is
 the short form of how to write it; read it before changing the UI. The commands:

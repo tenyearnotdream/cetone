@@ -69,7 +69,7 @@ func New(identity Identity, handlers Handlers) (*Server, error) {
 func (s *Server) properties(identity Identity) map[string]map[string]*prop.Prop {
 	identityName := identity.Name
 	if identityName == "" {
-		identityName = "ncmviva"
+		identityName = "cetone"
 	}
 	description := identity.Description
 	if description == "" {

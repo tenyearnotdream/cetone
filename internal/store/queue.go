@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // Queue is the play queue as it survives a restart: the songs, which one was

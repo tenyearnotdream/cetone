@@ -8,9 +8,9 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/player"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/player"
+	"cetone/internal/store"
 )
 
 // Run opens the window and keeps the media controls exported for as long as it
@@ -19,6 +19,11 @@ func Run(base app.Config, paths store.Paths) error {
 	a, err := New(paths)
 	if err != nil {
 		return err
+	}
+	// The desktop shows this picture on the taskbar and in Alt+Tab; without it
+	// the window wears the framework's default.
+	if icon, err := windowIcon(); err == nil {
+		base.Icon = icon
 	}
 	return app.RunApplication(func(application *app.Application) error {
 		_, config := a.Page(base)
@@ -142,12 +147,19 @@ func (a *App) sidebar(c ui.C) {
 	rail := ui.Column(c).Width(212).MinWidth(212).Shrink(0).FillHeight().Pad(12).Gap(4).Background(theme.Card)
 	rail.Children(func() {
 		ui.Row(c).Gap(10).Items(ui.Center).PadSides(8, 8, 14, 8).Children(func() {
-			ui.Row(c).Size(28, 28).Radius(8).Background(theme.Primary).Center().Children(func() {
-				ui.Icon(c, iconWave).Color(theme.PrimaryForeground)
-			})
+			// The application's own icon, decoded once and kept: the rail is
+			// painted on every frame, and decoding a PNG there would be a
+			// per-frame file read.
+			if logo := a.brandBitmap(); logo.Width > 0 {
+				ui.Image(c, logo).Size(28, 28)
+			} else {
+				ui.Row(c).Size(28, 28).Radius(8).Background(theme.Primary).Center().Children(func() {
+					ui.Icon(c, iconWave).Color(theme.PrimaryForeground)
+				})
+			}
 			ui.Column(c).Gap(0).Children(func() {
-				ui.Text(c, "网易云音乐").FontSize(14).Bold()
-				ui.Text(c, "Viva 客户端").FontSize(11).Muted()
+				ui.Text(c, "Cetone").FontSize(14).Bold()
+				ui.Text(c, "网易云音乐客户端").FontSize(11).Muted()
 			})
 		})
 		a.sidebarItem(c, routeDiscover, iconDiscover, "发现")

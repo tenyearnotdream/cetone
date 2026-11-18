@@ -13,8 +13,8 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 // The small helpers the pages and actions share: formatting, file copying, the

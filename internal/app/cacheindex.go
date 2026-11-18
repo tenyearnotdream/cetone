@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // cacheIndex remembers which songs have a cached file, so a list of a thousand

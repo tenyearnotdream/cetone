@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"ncmviva/internal/mpris"
-	"ncmviva/internal/ncm"
+	"cetone/internal/mpris"
+	"cetone/internal/ncm"
 )
 
 // The desktop's media controls: the media keys and the sound-menu widget reach
@@ -16,7 +16,7 @@ import (
 // not an error: the window simply has no media controls.
 func (a *App) startMPRIS() {
 	server, err := mpris.New(
-		mpris.Identity{Name: "ncmviva", Description: "网易云音乐", DesktopEntry: "ncmviva"},
+		mpris.Identity{Name: "cetone", Description: "Cetone 网易云音乐", DesktopEntry: "cetone"},
 		mpris.Handlers{
 			Play:      func() { a.work.push(func() { a.togglePlay() }); a.invalidate() },
 			Pause:     func() { a.work.push(func() { a.engine.Pause() }); a.invalidate() },

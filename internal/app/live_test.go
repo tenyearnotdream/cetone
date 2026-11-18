@@ -14,8 +14,8 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 func liveApp(t *testing.T) *App {

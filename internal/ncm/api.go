@@ -10,7 +10,7 @@ import (
 
 // deviceName is what a login reports to the API. It shows in the account's
 // device list.
-const deviceName = "ncmviva"
+const deviceName = "cetone"
 
 // QRLoginTicket is one poll of a QR login: the unikey to poll with and the URL
 // to draw as a code.

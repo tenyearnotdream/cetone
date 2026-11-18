@@ -14,8 +14,8 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 // A test drives the real page, painter, input router and focus rules with no

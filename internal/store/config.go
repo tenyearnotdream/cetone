@@ -3,7 +3,7 @@ package store
 import (
 	"path/filepath"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // Config is every preference the window edits. It is one flat struct so the

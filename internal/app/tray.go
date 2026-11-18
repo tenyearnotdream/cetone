@@ -14,16 +14,16 @@ package app
 // is an application the user cannot get back.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/png"
 
-	"bytes"
-
 	"github.com/vivaui/viva/app"
+	"github.com/vivaui/viva/gfx"
 
-	"ncmviva/internal/assets"
+	"cetone/internal/assets"
 )
 
 // trayIconSize is the icon the status area is given: 32 pixels stays sharp on
@@ -74,7 +74,7 @@ func (a *App) updateTray() {
 func (a *App) trayTooltip() string {
 	song, ok := a.current()
 	if !ok {
-		return "网易云音乐"
+		return "Cetone"
 	}
 	status := a.engine.Snapshot().Status.String()
 	state := "已暂停"
@@ -84,7 +84,7 @@ func (a *App) trayTooltip() string {
 	case "failed":
 		state = "播放失败"
 	}
-	return fmt.Sprintf("网易云音乐 · %s - %s（%s）", song.Name, song.Singer(), state)
+	return fmt.Sprintf("Cetone · %s - %s（%s）", song.Name, song.Singer(), state)
 }
 
 // trayMenu is the item's menu, built as it opens.
@@ -187,6 +187,38 @@ func (a *App) stopTray() {
 		a.tray = nil
 	}
 	a.trayAvailable = false
+}
+
+// brandBitmap is the application's icon as a bitmap for the page's own header.
+// It is decoded once: the header is declared on every frame.
+func (a *App) brandBitmap() gfx.Bitmap {
+	if a.brand.Decoded {
+		return a.brand.Bitmap
+	}
+	a.brand.Decoded = true
+	src, _, err := image.Decode(bytes.NewReader(assets.IconPNG))
+	if err != nil {
+		return gfx.Bitmap{}
+	}
+	bitmap := bitmapFromImage(src, 56, 56)
+	bitmap.ID = nextBitmapID()
+	a.brand.Bitmap = bitmap
+	return bitmap
+}
+
+// windowIcon is the application's picture for the taskbar and Alt+Tab: the same
+// artwork as the status item, at the size a desktop shows large icons. A failure
+// to read it is not fatal: the window opens with the desktop's default icon.
+func windowIcon() (app.WindowIcon, error) {
+	src, _, err := image.Decode(bytes.NewReader(assets.IconPNG))
+	if err != nil {
+		return app.WindowIcon{}, fmt.Errorf("窗口图标无法解码：%w", err)
+	}
+	pixels, err := straightRGBA(src, 512)
+	if err != nil {
+		return app.WindowIcon{}, err
+	}
+	return app.WindowIcon{Size: 512, RGBA: pixels}, nil
 }
 
 // statusIconFromPNG decodes an icon and scales it to a square of the given size

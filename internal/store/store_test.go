@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 func testPaths(t *testing.T) Paths {
@@ -231,5 +231,82 @@ func TestCoverStorePathsAreDistinctPerURLAndSize(t *testing.T) {
 	}
 	if _, ok := covers.Load("https://p1.music.126.net/a.jpg", 400); ok {
 		t.Fatal("a size that was never saved was loaded")
+	}
+}
+
+// Renaming the program must not orphan the cache: an earlier build's
+// directories are moved into place on first run, so the offline library the
+// user built up still plays.
+func TestLegacyDirectoriesAreMigrated(t *testing.T) {
+	root := t.TempDir()
+	// The old name's layout, with a cached song in it.
+	oldCache := filepath.Join(root, "cache", "ncmviva", "music")
+	if err := os.MkdirAll(oldCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	song := filepath.Join(oldCache, "music_347230_320000")
+	if err := os.WriteFile(song, []byte("audio bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldConfig := filepath.Join(root, "config", "ncmviva")
+	if err := os.MkdirAll(oldConfig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldConfig, "session.json"), []byte(`{"cookies":{"MUSIC_U":"token"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := Paths{
+		Config: filepath.Join(root, "config", AppName),
+		Data:   filepath.Join(root, "data", AppName),
+		Cache:  filepath.Join(root, "cache", AppName),
+	}
+	paths.migrateLegacy(filepath.Join(root, "config"), filepath.Join(root, "data"), filepath.Join(root, "cache"))
+
+	migrated := filepath.Join(paths.Cache, "music", "music_347230_320000")
+	if data, err := os.ReadFile(migrated); err != nil || string(data) != "audio bytes" {
+		t.Fatalf("the cached song was not migrated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Config, "session.json")); err != nil {
+		t.Fatalf("the session was not migrated: %v", err)
+	}
+	// The earlier directory is gone, not duplicated.
+	if _, err := os.Stat(oldCache); !os.IsNotExist(err) {
+		t.Fatal("the earlier cache directory was left behind")
+	}
+}
+
+// An existing directory of the new name wins: a migration never overwrites what
+// the running program has already written.
+func TestMigrationNeverOverwritesTheCurrentDirectory(t *testing.T) {
+	root := t.TempDir()
+	oldCache := filepath.Join(root, "cache", "ncmviva")
+	newCache := filepath.Join(root, "cache", AppName)
+	for _, dir := range []string{oldCache, newCache} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(oldCache, "old.txt"), []byte("old"), 0o644)
+	os.WriteFile(filepath.Join(newCache, "new.txt"), []byte("new"), 0o644)
+
+	paths := Paths{
+		Config: filepath.Join(root, "config", AppName),
+		Data:   filepath.Join(root, "data", AppName),
+		Cache:  newCache,
+	}
+	paths.migrateLegacy(filepath.Join(root, "config"), filepath.Join(root, "data"), filepath.Join(root, "cache"))
+
+	if _, err := os.Stat(filepath.Join(newCache, "new.txt")); err != nil {
+		t.Fatal("the current directory's file was lost")
+	}
+	if _, err := os.Stat(filepath.Join(oldCache, "old.txt")); err != nil {
+		t.Fatal("the earlier directory was touched although the current one exists")
+	}
+}
+
+func TestAppNameIsCetone(t *testing.T) {
+	if AppName != "cetone" {
+		t.Fatalf("the application name is %q", AppName)
 	}
 }

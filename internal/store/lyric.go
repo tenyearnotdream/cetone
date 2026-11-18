@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // LyricStore caches lyric files so a song heard before shows its words with no

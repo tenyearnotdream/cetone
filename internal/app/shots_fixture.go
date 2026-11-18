@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"time"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 // NewWithFixture builds an application whose model already holds a discover

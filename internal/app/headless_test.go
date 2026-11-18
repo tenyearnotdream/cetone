@@ -14,8 +14,8 @@ import (
 	"github.com/vivaui/viva/headless"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 // headlessModel returns an application over a temporary directory with the

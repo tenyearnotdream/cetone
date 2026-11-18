@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // Cache is the audio cache. Its file names are the ones the GTK client uses

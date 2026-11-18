@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"cetone/internal/store"
 	"github.com/vivaui/viva/app"
 	"github.com/vivaui/viva/headless"
-	"ncmviva/internal/store"
 )
 
 func TestLivePagesRender(t *testing.T) {

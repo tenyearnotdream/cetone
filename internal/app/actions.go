@@ -9,7 +9,7 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // Actions the pages call: opening the special lists, logging in and out,

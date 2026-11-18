@@ -12,12 +12,22 @@ import (
 	"path/filepath"
 )
 
+// AppName is the application's directory and identity name. The GTK client this
+// one replaces is read separately, by the functions below, so its cache is
+// adopted without being touched.
+const AppName = "cetone"
+
+// legacyAppNames are the directory names earlier builds of this program used.
+// They are migrated on first run, so a cache filled before the rename still
+// plays rather than looking empty.
+var legacyAppNames = []string{"ncmviva"}
+
 // Paths are the directories the application writes. They follow the XDG layout
 // that the GTK client used, so its cache and cookies can be adopted.
 type Paths struct {
-	Config string // ~/.config/ncmviva
-	Data   string // ~/.local/share/ncmviva
-	Cache  string // ~/.cache/ncmviva
+	Config string // ~/.config/cetone
+	Data   string // ~/.local/share/cetone
+	Cache  string // ~/.cache/cetone
 }
 
 // DefaultPaths resolves the application's directories.
@@ -31,11 +41,74 @@ func DefaultPaths() Paths {
 		cacheDir = os.TempDir()
 	}
 	dataDir := filepath.Join(homeDir(), ".local", "share")
-	return Paths{
-		Config: filepath.Join(configDir, "ncmviva"),
-		Data:   filepath.Join(dataDir, "ncmviva"),
-		Cache:  filepath.Join(cacheDir, "ncmviva"),
+	paths := Paths{
+		Config: filepath.Join(configDir, AppName),
+		Data:   filepath.Join(dataDir, AppName),
+		Cache:  filepath.Join(cacheDir, AppName),
 	}
+	paths.migrateLegacy(configDir, dataDir, cacheDir)
+	return paths
+}
+
+// migrateLegacy moves the directories of an earlier build into place, once. It
+// runs before anything reads them, so the cache, the session and the settings
+// carry over: a renamed program that lost the user's offline library would be
+// worse than one that kept its old name.
+//
+// A directory that already exists is left alone, and the earlier one stays where
+// it is rather than being merged into it; a rename that cannot happen is not an
+// error the user should see.
+func (p Paths) migrateLegacy(configDir, dataDir, cacheDir string) {
+	moves := []struct{ from, to string }{
+		{filepath.Join(configDir, legacyAppNames[0]), p.Config},
+		{filepath.Join(dataDir, legacyAppNames[0]), p.Data},
+		{filepath.Join(cacheDir, legacyAppNames[0]), p.Cache},
+	}
+	for _, move := range moves {
+		if _, err := os.Stat(move.from); err != nil {
+			continue
+		}
+		if _, err := os.Stat(move.to); err == nil {
+			continue
+		}
+		// Rename first: it is atomic and keeps the mtimes. Across file systems it
+		// fails, and a copy is the fallback.
+		if err := os.Rename(move.from, move.to); err == nil {
+			continue
+		}
+		copyTree(move.from, move.to)
+	}
+}
+
+// copyTree copies a directory tree, for the migration that cannot rename.
+func copyTree(from, to string) {
+	walkErr := filepath.Walk(from, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		relative, relErr := filepath.Rel(from, path)
+		if relErr != nil {
+			return nil
+		}
+		target := filepath.Join(to, relative)
+		if info.IsDir() {
+			os.MkdirAll(target, 0o755)
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return nil
+		}
+		os.WriteFile(target, data, 0o644)
+		return nil
+	})
+	if walkErr != nil {
+		return
+	}
+	os.RemoveAll(from)
 }
 
 func homeDir() string {

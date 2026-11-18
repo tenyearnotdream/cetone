@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"ncmviva/internal/ncm"
+	"cetone/internal/ncm"
 )
 
 // Session is the saved login and the account it belongs to.

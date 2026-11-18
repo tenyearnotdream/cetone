@@ -17,12 +17,12 @@ import (
 	"github.com/vivaui/viva/app"
 	"github.com/vivaui/viva/headless"
 
-	ncmapp "ncmviva/internal/app"
-	"ncmviva/internal/store"
+	ncmapp "cetone/internal/app"
+	"cetone/internal/store"
 )
 
 func main() {
-	dir := "/tmp/ncmviva-shots"
+	dir := "/tmp/cetone-shots"
 	if len(os.Args) > 1 {
 		dir = os.Args[1]
 	}
@@ -40,7 +40,7 @@ func main() {
 
 // shoot renders each page of one theme.
 func shoot(dir, suffix string, dark bool) {
-	root, err := os.MkdirTemp("", "ncmviva-shots")
+	root, err := os.MkdirTemp("", "cetone-shots")
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -8,9 +8,9 @@ import (
 
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/player"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/player"
+	"cetone/internal/store"
 )
 
 // Playback. The rule that makes this client's offline library work: a cached

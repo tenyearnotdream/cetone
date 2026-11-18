@@ -1,4 +1,4 @@
-// Command ncmviva is a NetEase Cloud Music client built with Viva: no web view,
+// Command cetone is a NetEase Cloud Music client built with Viva: no web view,
 // a Go API client, and an audio engine that plays a cached file before it asks
 // the server for a URL.
 //
@@ -14,8 +14,8 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	vivaapp "ncmviva/internal/app"
-	"ncmviva/internal/store"
+	vivaapp "cetone/internal/app"
+	"cetone/internal/store"
 )
 
 // version is reported by --version and in the window's title.
@@ -25,11 +25,11 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--version", "-v":
-			fmt.Printf("ncmviva %s\n", version)
+			fmt.Printf("cetone %s\n", version)
 			return
 		case "--help", "-h":
-			fmt.Println("ncmviva — 网易云音乐客户端（Viva）")
-			fmt.Println("\n用法: ncmviva [--version] [--help]")
+			fmt.Println("Cetone — 网易云音乐客户端（Viva）")
+			fmt.Println("\n用法: cetone [--version] [--help]")
 			fmt.Println("\n配置、缓存与会话保存在 XDG 目录下；旧 GTK 版的音频缓存会被自动识别并优先读取。")
 			return
 		}
@@ -37,8 +37,8 @@ func main() {
 
 	paths := store.DefaultPaths()
 	config := app.Config{
-		Title:     "网易云音乐",
-		Class:     "ncmviva",
+		Title:     "Cetone — 网易云音乐",
+		Class:     "cetone",
 		Width:     1160,
 		Height:    740,
 		MinWidth:  880,

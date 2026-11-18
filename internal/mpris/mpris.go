@@ -50,7 +50,7 @@ type Handlers struct {
 
 // Identity is what the desktop's widget titles the application.
 type Identity struct {
-	// Name is the application name ("ncmviva").
+	// Name is the application name ("cetone").
 	Name string
 	// Description is the long name the sound menu shows.
 	Description string

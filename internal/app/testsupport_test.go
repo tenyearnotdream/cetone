@@ -9,7 +9,7 @@ import (
 
 	"github.com/vivaui/viva/app"
 
-	"ncmviva/internal/player"
+	"cetone/internal/player"
 )
 
 // The test support: a wav fixture, a sink that counts what it was handed, and a

@@ -19,10 +19,10 @@ import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
-	"ncmviva/internal/mpris"
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/player"
-	"ncmviva/internal/store"
+	"cetone/internal/mpris"
+	"cetone/internal/ncm"
+	"cetone/internal/player"
+	"cetone/internal/store"
 )
 
 // App is everything the window shows and everything it remembers.
@@ -112,6 +112,12 @@ type App struct {
 	application   *app.Application
 	mprisServer   mprisServer
 	quitRequested bool
+	// brand is the application's icon, decoded once for the page's header.
+	brand struct {
+		Decoded bool
+		Bitmap  gfx.Bitmap
+	}
+
 	// tray is the status item, when the desktop has a status area for one.
 	tray          *app.StatusItem
 	trayAvailable bool

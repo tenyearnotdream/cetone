@@ -23,8 +23,8 @@ import (
 	"github.com/vivaui/viva/app"
 	"github.com/vivaui/viva/headless"
 
-	"ncmviva/internal/ncm"
-	"ncmviva/internal/store"
+	"cetone/internal/ncm"
+	"cetone/internal/store"
 )
 
 // acceptancePaths is one application's directories, kept across a simulated
