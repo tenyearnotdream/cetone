@@ -9,5 +9,17 @@ icon = "data/icon.png"
 [linux]
 category = "AudioVideo"
 comment = "Cetone — 网易云音乐客户端（Viva 自绘界面，缓存优先离线播放）"
-depends = ["libasound2", "libxcb1", "libvulkan1"]
+# What the program opens at run time: the sound server (ALSA, which a desktop
+# routes to PipeWire or PulseAudio), the X11 connection, Vulkan, and the text
+# stack Viva shapes and rasterizes labels with.
+depends = [
+  "libasound2",
+  "libxcb1",
+  "libvulkan1",
+  "libpango-1.0-0",
+  "libpangocairo-1.0-0",
+  "libpangoft2-1.0-0",
+  "libcairo2",
+  "libfontconfig1",
+]
 keywords = ["music", "netease", "player", "cetone", "网易云音乐"]

@@ -96,15 +96,56 @@ cmd/shots/                 无窗口渲染各页面的开发工具（-tags vivas
 ## 构建与运行
 
 ```sh
-go build ./...          # 编译
-go test ./... -count=1  # 无窗口的端到端测试（真实页面、绘制、输入路由）
-viva vet                # 检查“能编译但画错”的页面写法
-viva build              # 发布版程序 build/cetone
-viva package --target linux   # 打包 tar.gz / deb
+make build     # = go tool viva build，产出 build/cetone
+make test      # = go test ./... -count=1（无窗口，驱动真实页面与输入）
+make vet       # gofmt + go vet + go tool viva vet
+make package   # = go tool viva package --target linux（tar.gz）
+make run       # = go tool viva dev .（热重载）
 ```
 
-需要 Go 1.26+；运行时需要 `libasound.so.2`、X11 的 `libxcb` 与 Vulkan 加载器（都是系统库，不打包）。
-没有声卡时程序照常运行：进度、歌词与 MPRIS 仍然工作，只是静音。
+需要 Go 1.26+；`viva` 命令由 `go.mod` 的 `tool` 行固定版本，用 `go tool viva` 调用，
+不用单独安装。
+
+**运行库**：程序本身只链接 libc，X11 / Vulkan / Pango / Cairo / 音频后端都是运行时
+用 `dlopen` 打开的，所以**构建不需要任何 `-dev` 包**。运行时需要：
+
+| 用途 | 库 |
+| --- | --- |
+| 窗口 | `libxcb.so.1`、`libvulkan.so.1` |
+| 文字 | `libpango-1.0.so.0`、`libpangocairo`、`libpangoft2`、`libcairo.so.2`、`libfontconfig.so.1` |
+| 声音 | `libasound.so.2`（桌面会路由到 PipeWire/PulseAudio） |
+
+deb 包已把上面这些写进 `Depends`。没有声卡时程序照常运行：进度、歌词与 MPRIS 仍然
+工作，只是静音。
+
+## 支持的平台
+
+| 平台 | 状态 | 怎么构建 |
+| --- | --- | --- |
+| Linux amd64 / arm64 | ✅ 已验证（本机实际播放、托盘、MPRIS） | 任意 Linux 主机直接构建 |
+| Windows amd64 / arm64 | ✅ 可交叉编译（已验证 PE32+ 产物） | 从 Linux 交叉编译，无需 cgo |
+| macOS arm64 / amd64 | ⚠️ **必须 macOS 主机** | Viva 的 Cocoa/Metal 桥是 cgo + Objective-C，无法交叉编译 |
+| Web (wasm) | ❌ 不支持 | 浏览器目标没有托盘、文件系统/本地缓存与系统音频 |
+
+发布用 GitHub Actions：`.github/workflows/release.yml` 推 tag 时在三个 runner 上
+分别构建（`ubuntu-latest` 出 Linux/Windows，`macos-latest` 出 macOS），产物挂到
+Release 并附 `SHA256SUMS`。`.github/workflows/ci.yml` 在每次提交上跑 vet、测试与
+四平台交叉编译检查。
+
+**签名**：默认不签名。Linux 包与 Windows zip 未签名（Windows 会提示 SmartScreen）；
+macOS 未签名时需要右键“打开”。要签名就在仓库 Secrets 里配
+`APPLE_SIGNING_IDENTITY`（配合 `APPLE_CERTIFICATE`/`APPLE_ID` 等），workflow 会自动改用
+签名并额外产出 `.dmg`，无需改代码。
+
+## 发布到此仓库
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHub Release
+```
+
+也可以手动触发（Actions → Release → Run workflow），填版本号即可；workflow 会自己
+打 tag。
 
 ## 数据位置
 

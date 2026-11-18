@@ -3,4 +3,6 @@
 *.deb
 *.tar.gz
 *.test
-ncmviva
+# A program built in place by `go build`; the release build goes to /build.
+/cetone
+/ncmviva

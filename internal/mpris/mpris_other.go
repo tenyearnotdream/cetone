@@ -17,7 +17,7 @@ func New(identity Identity, handlers Handlers) (*Server, error) {
 func (s *Server) Update(track Track, status Status, position Duration, volume float64) {}
 
 // PublishPosition does nothing without a server.
-func (s *Server) SetPosition(position Duration) {}
+func (s *Server) PublishPosition(position Duration) {}
 
 // Close does nothing without a server.
 func (s *Server) Close() {}

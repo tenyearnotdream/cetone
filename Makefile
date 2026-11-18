@@ -23,6 +23,13 @@ vet:
 package:
 	go tool viva package --target linux
 
+# The two targets a Linux host can build: macOS needs a macOS host.
+package-windows:
+	go tool viva package --target windows --format zip
+
+# Everything a local machine can produce, for a release made by hand.
+release-local: vet test package package-windows
+
 # Render every page in both themes without opening a window.
 shots:
 	go run -tags vivashots ./cmd/shots build/shots

@@ -1,0 +1,103 @@
+# The checks every change must pass. They run the same commands a developer does
+# (see the Makefile), so a green run here and a green run locally mean the same
+# thing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: vet and test (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The version in go.mod's `go` line, which is what the project builds
+          # against; the viva command pins its own toolchain from there.
+          go-version-file: go.mod
+          cache: true
+
+      # The program links only libc: X11, Vulkan, Pango, Cairo and the sound
+      # server are opened with dlopen when they are used. So the build needs no
+      # -dev package, and the tests need the runtime ones, because the headless
+      # session paints text through the platform text engine (Pango and friends)
+      # and the pages are full of Chinese text.
+      - name: Install the runtime libraries the tests paint through
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 \
+            libcairo2 libfontconfig1 fonts-noto-cjk
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # The page mistakes that compile: an unkeyed button in a loop, a kept C, a
+      # Memo whose value misses a field its function reads.
+      - name: viva vet
+        run: go tool viva vet
+
+      - name: go test
+        run: go test ./... -count=1
+
+  cross-build:
+    name: cross-build ${{ matrix.target }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux, arch: amd64 }
+          - { target: linux, arch: arm64 }
+          - { target: windows, arch: amd64 }
+          - { target: windows, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A cross build that stops compiling is a change that shipped a platform
+      # nobody ran. This proves every target still builds, before the release
+      # workflow ever runs.
+      - name: Build
+        run: go tool viva build --target ${{ matrix.target }} --arch ${{ matrix.arch }}
+
+      # viva names a native build plainly and a cross build with its target, so
+      # the check looks at what was produced rather than at a fixed name.
+      - name: Check the program is the format the target needs
+        run: |
+          echo "produced:"
+          find build -maxdepth 2 -type f -printf "  %p\n"
+          program=$(find build -maxdepth 1 -type f \( -name 'cetone*' \) ! -name '*.deb' ! -name '*.tar.gz' ! -name '*.zip' | head -1)
+          if [ -z "$program" ]; then echo "no program was produced"; exit 1; fi
+          echo "checking $program:"
+          file "$program"
+          want="${{ matrix.target }}/${{ matrix.arch }}"
+          case "$want" in
+            linux/amd64)   file "$program" | grep -q "ELF 64-bit LSB.*x86-64" ;;
+            linux/arm64)   file "$program" | grep -q "ELF 64-bit LSB.*aarch64" ;;
+            windows/amd64) file "$program" | grep -q "PE32+ executable.*x86-64" ;;
+            windows/arm64) file "$program" | grep -q "PE32+ executable.*Aarch64" ;;
+            *) echo "unknown target $want"; exit 1 ;;
+          esac
+          echo "ok: $program is $want"

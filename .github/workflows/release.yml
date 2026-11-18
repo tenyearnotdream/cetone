@@ -1,0 +1,198 @@
+# A tagged release: build the installers on the host each target needs, then
+# attach them to a GitHub Release.
+#
+# Why the split:
+#   - macOS reaches Cocoa and Metal through cgo and an Objective-C bridge, which
+#     cannot be cross-compiled. Viva says so itself ("building for darwin needs a
+#     macOS host"), and it is why the darwin job runs on macos-latest.
+#   - Linux and Windows builds use no cgo, so one ubuntu job covers both, and
+#     both architectures.
+#
+# Nothing is signed: the Linux packages and the Windows zip are unsigned, so a
+# downloaded installer warns. Signing is opt-in in viva (APPLE_SIGNING_IDENTITY
+# and friends); the secrets are read here if they exist, so adding them later
+# needs no workflow change.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # One place for the version: the tag, or what a manual run typed.
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+jobs:
+  linux:
+    name: linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # tar.gz (an install script) and deb. Writing the version into viva.toml
+      # keeps the package metadata and the tag in step; the file stays the
+      # source of truth for everything else.
+      - name: Set the version
+        run: |
+          v="${VERSION#v}"
+          sed -i "s/^version = .*/version = \"$v\"/" viva.toml
+          grep -E '^(name|version|id) ' viva.toml
+
+      - name: Package
+        run: go tool viva package --target linux --arch ${{ matrix.arch }} --format tar.gz,deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            build/*.tar.gz
+            build/*.deb
+
+  windows:
+    name: windows ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set the version
+        run: |
+          v="${VERSION#v}"
+          sed -i "s/^version = .*/version = \"$v\"/" viva.toml
+          grep -E '^(name|version|id) ' viva.toml
+
+      # A zip of the program and its libraries. The NSIS installer needs
+      # makensis, which the windows-latest image carries but this one does not;
+      # a zip keeps a release reproducible from a single host.
+      - name: Package
+        run: go tool viva package --target windows --arch ${{ matrix.arch }} --format zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: build/*.zip
+
+  macos:
+    name: macos ${{ matrix.arch }}
+    # The only host that can build it; see the comment at the top.
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set the version
+        run: |
+          v="${VERSION#v}"
+          sed -i '' "s/^version = .*/version = \"$v\"/" viva.toml
+          grep -E '^(name|version|id) ' viva.toml
+
+      # .app in a zip is what a user without a Developer ID can open with a
+      # right click; a .dmg needs no signing either but is one more thing to
+      # unverified-mount. Both are built when a signing identity exists, because
+      # then the bundle is one Gatekeeper accepts.
+      - name: Package
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_SIGNING_IDENTITY" ] || [ -n "$APPLE_CERTIFICATE" ]; then
+            go tool viva package --target darwin --arch ${{ matrix.arch }} --format app,zip,dmg
+          else
+            echo "no signing identity configured: building an unsigned bundle"
+            go tool viva package --target darwin --arch ${{ matrix.arch }} --format zip --no-sign
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            build/*.zip
+            build/*.dmg
+
+  publish:
+    name: publish the release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what is being published
+        run: |
+          echo "version: $VERSION"
+          find artifacts -type f -printf "%s  %p\n" | sort -k2
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          # A reader downloads an archive and can check it against this file.
+          find . -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.zip' -o -name '*.dmg' \) -printf "%f\n" \
+            | sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      # Re-running a failed release finds the assets a previous run attached;
+      # this replaces them rather than failing.
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$VERSION"
+          case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "replacing the existing release $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+          # A manual run has no tag yet: create it at the commit being released.
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+          # The asset list is built from what was actually produced: an unsigned
+          # macOS job writes a zip and no dmg, and a glob that matches nothing
+          # would fail the release.
+          assets=$(find artifacts -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.zip' \
+               -o -name '*.dmg' -o -name 'SHA256SUMS' \) -print | sort)
+          if [ -z "$assets" ]; then echo "no assets to publish"; exit 1; fi
+          echo "publishing:"
+          echo "$assets"
+          # shellcheck disable=SC2086
+          gh release create "$tag" --title "Cetone $tag" --generate-notes $assets

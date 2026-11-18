@@ -785,7 +785,7 @@ func (e *Engine) newSink() Sink {
 	if e.NewSink != nil {
 		return e.NewSink()
 	}
-	return &alsaSink{}
+	return &deviceSink{}
 }
 
 func (e *Engine) setBuffered(v float64) {
