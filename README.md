@@ -154,7 +154,7 @@ cmd/shots/                 无窗口渲染各页面的开发工具（-tags vivas
 | --- | --- | --- |
 | Linux x86_64 | `cetone_x.y.z_amd64.deb` | `sudo apt install ./cetone_x.y.z_amd64.deb`（自动装依赖） |
 | Linux x86_64 / arm64 | `cetone-x.y.z-linux-*.tar.gz` | 解开后 `./install.sh`（默认 `~/.local`，`--prefix` 可改） |
-| Windows x86_64 / arm64 | `cetone-x.y.z-windows-*.zip` | 解开直接运行 `cetone.exe` |
+| Windows x86_64 / arm64 | `cetone-x.y.z-windows-*.zip` | 解开直接运行 `cetone.exe`（单个文件，无 DLL） |
 | macOS arm64 / amd64 | `cetone-x.y.z-darwin-*.zip` | 解开得到 `Cetone.app`，第一次需右键「打开」 |
 
 校验下载：`sha256sum -c SHA256SUMS`。
@@ -212,6 +212,69 @@ git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHu
 
 也可以手动触发（Actions → Release → Run workflow），填版本号即可；workflow 会自己
 打 tag。
+
+## Windows 打包与 Smart App Control
+
+### 打包
+
+```sh
+make package-windows                 # zip：一个 cetone.exe，Go 静态链接，无 DLL
+make package-windows-installer       # NSIS 安装包，需要 makensis
+```
+
+NSIS 需要先装 `makensis`（Debian/Ubuntu `sudo apt install nsis`，macOS
+`brew install nsis`）。在 Linux 上就能交叉产出 Windows 包，不需要 Windows 机器。
+
+### 「智能应用控制」为什么拦它
+
+Smart App Control（SAC，Windows 11）不是安装器的问题，也不是缺什么"微软密钥"。
+按[微软文档](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview)：
+
+> Smart App Control will still allow an app to run if it is signed with a
+> certificate issued by a certificate authority (CA) within the Trusted Root
+> Program. Malware, Potentially Unwanted Apps (PUA), and unknown, unsigned code
+> are blocked by default.
+
+也就是说它只有两个放行条件：**微软云端认得这个程序**，或者**它有受信任 CA 签发的
+代码签名**。未签名的陌生程序（这个客户端就是）直接拦下，换成 zip、NSIS、winget
+都一样被拦——打包方式不改变结论。
+
+### 可选的做法，按成本排序
+
+| 做法 | 效果 | 代价 |
+| --- | --- | --- |
+| 不签名，文档写清楚 | 用户需在「Windows 安全中心 → 应用和浏览器控制」里关掉 SAC | 关掉后**不能重新开启**（只能重置/重装系统），多数用户不会接受 |
+| 向公共 CA 买代码签名证书（OV/EV） | SAC 放行；SmartScreen 仍需积累声誉（EV 起步更快） | 按年付费；2023 年 6 月起私钥必须放在硬件令牌或云 HSM 里 |
+| 上架 Microsoft Store（MSIX） | 商店包由微软签名，SAC 放行 | 需要开发者账号并过审 |
+| 只分发源码 | 用户自己编译 | 对手动构建的用户可行 |
+
+**没有"向微软申请一个密钥"这条路径**。微软自己的签名服务是 Azure Artifact
+Signing（原 Trusted Signing），但它对 Public Trust 证书有地区限制：组织需在
+美国、加拿大、欧盟、英国、澳新、日韩、新加坡、瑞士、挪威、以色列；**个人开发者
+只能在美国或加拿大**。在中国大陆的个人开发者用不了这条路，只能找公共 CA。
+
+### 在 Linux 上给已打好的包签名
+
+`viva package` 会用 `osslsigncode`（或 Windows 上的 `signtool`）签名程序和安装包：
+
+```sh
+export WINDOWS_CERTIFICATE_FILE=/path/to/cert.pfx
+export WINDOWS_CERTIFICATE_PASSWORD='...'
+export WINDOWS_TIMESTAMP_URL=http://timestamp.digicert.com
+make package-windows
+```
+
+证书在硬件令牌里时 `.pfx` 导不出来，用 `--sign-command`（或
+`$WINDOWS_SIGN_COMMAND`）指定一个能签 `{file}` 的命令，例如经 PKCS#11 调令牌：
+
+```sh
+go tool viva package --target windows --format nsis \
+  --sign-command 'osslsigncode sign -pkcs11module /usr/lib/pkcs11/... \
+    -key 0 -certs mycert.pem -ts http://timestamp.digicert.com \
+    -in {file} -out {file}.signed && mv {file}.signed {file}'
+```
+
+未配置证书时 `viva package` 会正常出包，只是不签名（这次发布就是这样）。
 
 ## 数据位置
 

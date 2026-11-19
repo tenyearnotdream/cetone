@@ -1,7 +1,7 @@
 # Cetone builds with the Go toolchain and the viva command, which go.mod pins as
 # a tool, so `go tool viva` needs no separate install.
 
-.PHONY: all build test race vet run package shots icons install-icons clean
+.PHONY: all build test race vet run package package-windows package-windows-installer shots icons install-icons clean
 
 all: vet test build
 
@@ -28,8 +28,15 @@ package:
 	go tool viva package --target linux
 
 # The two targets a Linux host can build: macOS needs a macOS host.
+#
+# A zip needs nothing but the Go toolchain. The NSIS installer additionally needs
+# makensis (`apt install nsis`); it is the format most Windows users expect,
+# because it adds the Start menu entry and the uninstaller.
 package-windows:
 	go tool viva package --target windows --format zip
+
+package-windows-installer:
+	go tool viva package --target windows --format nsis
 
 # Everything a local machine can produce, for a release made by hand.
 release-local: vet test package package-windows
