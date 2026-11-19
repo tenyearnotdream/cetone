@@ -235,15 +235,21 @@ func New(paths store.Paths) (*App, error) {
 
 // ----- the window -----
 
-// Page builds the page and its window config, for a test that drives it with
-// no window. The returned config already carries the Invalidator workers wake,
-// and the application holds that same value: replacing config.Invalidator with
-// a fresh one afterwards would leave the application waking an invalidator no
-// window listens to, and a worker's result would never be painted.
+// Page builds the page and its window config. The returned config already
+// carries the Invalidator workers wake, and the application holds that same
+// value: replacing config.Invalidator with a fresh one afterwards would leave
+// the application waking an invalidator no window listens to, and a worker's
+// result would never be painted.
+//
+// It also carries OnWake, which drains the work queue before each repaint. That
+// is what makes a worker's result visible: the wake asks for the repaint, and
+// the drain is what puts the result in the model the repaint reads. A window
+// opened with this config — by Run or by a test — behaves the same way.
 func (a *App) Page(base app.Config) (*ui.Page, app.Config) {
 	theme, follow := a.themeConfig()
 	page := ui.NewPage(ui.PageConfig{View: a.page, Theme: theme, FollowSystemTheme: follow})
 	config := page.Config(base)
+	config.OnWake = a.sync
 	a.inv = config.Invalidator
 	return page, config
 }

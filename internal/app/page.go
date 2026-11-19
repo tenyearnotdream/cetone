@@ -31,11 +31,9 @@ func Run(base app.Config, paths store.Paths) error {
 		// Closing the window hides it when there is a status item to come back
 		// from; otherwise it quits, as any window does.
 		config.OnCloseRequest = a.handleCloseRequest
-		// Work published by a worker or by a tray menu is applied here as well as
-		// in the page: a hidden window is not painted, so the page's own drain
-		// never runs, and a tray action while hidden would otherwise sit in the
-		// queue until something else showed the window.
-		config.OnWake = a.sync
+		// OnWake is already set by Page: work published by a worker or by a tray
+		// menu is applied there as well as in the page, because a hidden window
+		// is not painted and the page's own drain never runs.
 		config.OnClosed = func() {
 			a.stopTray()
 			a.stopMPRIS()
