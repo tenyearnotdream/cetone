@@ -35,6 +35,9 @@ func Run(base app.Config, paths store.Paths) error {
 		// menu is applied there as well as in the page, because a hidden window
 		// is not painted and the page's own drain never runs.
 		config.OnClosed = func() {
+			// The cookies the server set during this run are what the next start
+			// needs; saving them here is what makes the login remembered.
+			a.persistSession()
 			a.stopTray()
 			a.stopMPRIS()
 			application.Quit()
@@ -50,6 +53,9 @@ func Run(base app.Config, paths store.Paths) error {
 		a.startTray()
 		a.startMPRIS()
 		a.restoreQueue()
+		// A saved login is checked against the server, so an expired one shows
+		// as expired instead of as an account nothing works for.
+		a.refreshSession()
 		if a.trayErr != nil {
 			a.toast("状态栏图标不可用", a.trayErr.Error(), ui.ToastWarning)
 		}

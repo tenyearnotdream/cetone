@@ -116,6 +116,10 @@ func TestPlaysAndReportsItsLength(t *testing.T) {
 	writeWAV(t, path, 8000, 2, 0.6)
 
 	e, sink := newTestEngine(t)
+	// The callbacks are set before playing: the session goroutine reads them as
+	// it runs, so assigning one later would race with it.
+	finished := make(chan struct{}, 1)
+	e.OnFinish = func() { finished <- struct{}{} }
 	if err := e.Play(context.Background(), Source{Title: "tone", File: path}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +136,6 @@ func TestPlaysAndReportsItsLength(t *testing.T) {
 		t.Fatalf("position after 250ms is %v", snap.Position)
 	}
 	// The end of the source stops the session and reports it.
-	finished := make(chan struct{}, 1)
-	e.OnFinish = func() { finished <- struct{}{} }
 	select {
 	case <-finished:
 	case <-time.After(3 * time.Second):

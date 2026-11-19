@@ -91,6 +91,10 @@ type Engine struct {
 	// records what it was handed.
 	NewSink func() Sink
 	// OnChange reports a visible state change, for the window's Invalidator.
+	//
+	// The three callbacks are read by the session goroutine while it runs, so set
+	// them before Play and not again afterwards: assigning one mid-session races
+	// with the goroutine that calls it.
 	OnChange func()
 	// OnFinish reports a session that reached its end.
 	OnFinish func()

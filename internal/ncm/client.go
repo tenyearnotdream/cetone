@@ -63,24 +63,51 @@ func newCookieStore() *cookieStore {
 	return &cookieStore{values: make(map[string]string)}
 }
 
-// load restores cookies saved by SaveCookies.
+// deviceCookies are the fields that make this client one device to the API. They
+// are created once, on the first launch that has no saved session, and then kept
+// for the life of the installation: a client whose device id changes on every
+// start looks like a new device each time, which is what a login is remembered
+// against.
+var deviceCookies = []string{"_ntes_nuid", "_ntes_nnid", "NMTID", "WNMCID", "WEVNSM", "__remember_me"}
+
+// requestCookies belong to one request's headers, not to the session. They are
+// never stored, so they are not written to the session file either.
+var requestCookies = []string{"os", "appver", "osver", "deviceId"}
+
+// load restores cookies saved by Cookies. A saved session already names a
+// device, so the device fields are kept as they are instead of being generated
+// again on the next request.
 func (s *cookieStore) load(values map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, v := range values {
-		if k != "" && v != "" {
-			s.values[k] = v
+		if k == "" || v == "" {
+			continue
+		}
+		s.values[k] = v
+	}
+	for _, name := range deviceCookies {
+		if s.values[name] != "" {
+			s.baseSet = true
+			break
 		}
 	}
 }
 
-// snapshot returns a copy of the cookies, safe to save to disk.
+// snapshot returns the cookies to save to disk: the device fields and the
+// session's own, without the per-request ones.
 func (s *cookieStore) snapshot() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]string, len(s.values))
 	for k, v := range s.values {
+		if k == "" || v == "" {
+			continue
+		}
 		out[k] = v
+	}
+	for _, name := range requestCookies {
+		delete(out, name)
 	}
 	return out
 }
@@ -110,51 +137,90 @@ func (s *cookieStore) clearSession() {
 	s.baseSet = false
 }
 
-// header builds the Cookie header: the device fields the API expects, then a
-// login token or the anonymous device id, then whatever the server set while
-// the session ran.
+// header builds the Cookie header for one request: the device fields that
+// identify this installation, the login token, then whatever the server set
+// while the session ran.
+//
+// It is a pure read of the stored cookies. The fields that differ between the
+// weapi and eapi transports are added to the returned string only, never to the
+// store: they belong to the request, and writing them into the session would
+// both outlive their meaning and race with the requests running beside this one.
 func (s *cookieStore) header(mode encryptMode) string {
+	fields := s.fields(mode)
+	parts := make([]string, 0, len(fields)+1)
+	for _, field := range fields {
+		parts = append(parts, field.name+"="+field.value)
+	}
+	parts = append(parts, "channel=")
+	return strings.Join(parts, "; ")
+}
+
+// nameValue is one cookie field, ready to be written into a header.
+type nameValue struct{ name, value string }
+
+// fields is the ordered content of the Cookie header: the device and session
+// cookies, and the transport's own fields in place of the defaults.
+func (s *cookieStore) fields(mode encryptMode) []nameValue {
 	s.mu.Lock()
 	if !s.baseSet {
-		now := strconv.FormatInt(time.Now().UnixMilli(), 10)
-		nuid := randomHex(16)
-		s.values["_ntes_nuid"] = nuid
-		s.values["_ntes_nnid"] = nuid + "," + now
-		s.values["NMTID"] = randomHex(8)
-		s.values["WNMCID"] = fmt.Sprintf("%02x%02x%02x.%s", randomByte(), randomByte(), randomByte(), now)
-		s.values["WEVNSM"] = "1.0.0"
-		s.values["__remember_me"] = "true"
-		s.values["os"] = "pc"
-		s.values["appver"] = "2.7.1.198277"
-		s.values["osver"] = "10"
-		s.baseSet = true
-	}
-	if mode == modeEapi {
-		s.values["os"] = "iphone"
-		s.values["appver"] = "9.0.90"
-		s.values["osver"] = "16.2"
+		s.initDeviceLocked()
 	}
 	s.mu.Unlock()
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.values["MUSIC_U"] == "" {
-		// An anonymous visitor is identified by the device id.
-		s.values["deviceId"] = s.values["_ntes_nuid"]
+	osName, appver, osver := "pc", "2.7.1.198277", "10"
+	if mode == modeEapi {
+		osName, appver, osver = "iphone", "9.0.90", "16.2"
 	}
-	names := make([]string, 0, len(s.values))
-	for name := range s.values {
+
+	s.mu.RLock()
+	stored := make(map[string]string, len(s.values))
+	for name, value := range s.values {
+		stored[name] = value
+	}
+	s.mu.RUnlock()
+
+	// An anonymous visitor is identified by the device id.
+	if stored["MUSIC_U"] == "" {
+		stored["deviceId"] = stored["_ntes_nuid"]
+	}
+	transport := map[string]string{"os": osName, "appver": appver, "osver": osver}
+	for name, value := range transport {
+		stored[name] = value
+	}
+	for _, name := range requestCookies {
+		if name == "deviceId" {
+			continue
+		}
+		stored[name] = transport[name]
+	}
+
+	names := make([]string, 0, len(stored))
+	for name := range stored {
+		if name == "" || stored[name] == "" {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	parts := make([]string, 0, len(names))
+	out := make([]nameValue, 0, len(names))
 	for _, name := range names {
-		parts = append(parts, name+"="+s.values[name])
+		out = append(out, nameValue{name: name, value: stored[name]})
 	}
-	delete(s.values, "deviceId")
-	parts = append(parts, "channel=")
-	sort.Strings(parts)
-	return strings.Join(parts, "; ")
+	return out
+}
+
+// initDeviceLocked gives a client that has never run a device identity. A loaded
+// session keeps the one it was saved with.
+func (s *cookieStore) initDeviceLocked() {
+	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	nuid := randomHex(16)
+	s.values["_ntes_nuid"] = nuid
+	s.values["_ntes_nnid"] = nuid + "," + now
+	s.values["NMTID"] = randomHex(8)
+	s.values["WNMCID"] = fmt.Sprintf("%02x%02x%02x.%s", randomByte(), randomByte(), randomByte(), now)
+	s.values["WEVNSM"] = "1.0.0"
+	s.values["__remember_me"] = "true"
+	s.baseSet = true
 }
 
 // Client is one NetEase Cloud Music session. It is safe for concurrent use:

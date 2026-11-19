@@ -1,7 +1,7 @@
 # Cetone builds with the Go toolchain and the viva command, which go.mod pins as
 # a tool, so `go tool viva` needs no separate install.
 
-.PHONY: all build test vet run package shots icons install-icons clean
+.PHONY: all build test race vet run package shots icons install-icons clean
 
 all: vet test build
 
@@ -13,6 +13,10 @@ run:
 
 test:
 	go test ./... -count=1
+
+# The same tests with the race detector, which CI runs.
+race:
+	go test ./... -count=1 -race
 
 # viva vet finds page mistakes that compile but paint the wrong thing.
 vet:

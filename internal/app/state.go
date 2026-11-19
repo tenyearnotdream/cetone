@@ -427,3 +427,47 @@ func (a *App) section(kind routeKind) {
 	a.load(a.nav[0])
 	a.invalidate()
 }
+
+// persistSession writes the cookies the client holds now. It is called after a
+// login, after a session was refreshed, and on the way out: whatever the server
+// set during the run is what the next start needs, and a run that never wrote it
+// back would ask for the QR code again.
+func (a *App) persistSession() {
+	if a.user.UserID == 0 {
+		return
+	}
+	_ = a.sessions.Save(storeSessionFrom(a.client, a.user))
+}
+
+// refreshSession asks the server whether the saved login still works. A session
+// the server no longer accepts is cleared and the window says so, rather than
+// showing an account whose every request will be refused.
+func (a *App) refreshSession() {
+	if a.user.UserID == 0 {
+		return
+	}
+	a.background(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		user, err := a.client.LoginStatus(ctx)
+		a.work.push(func() {
+			switch {
+			case err == nil:
+				a.user = user
+				// The answer may carry refreshed cookies: keep them.
+				a.persistSession()
+			case errors.Is(err, ncm.ErrNotLoggedIn):
+				a.user = ncm.UserInfo{}
+				a.likedSet = make(map[int64]bool)
+				a.data.mine = mineData{}
+				_ = a.sessions.Clear()
+				a.toast("登录已失效", "请重新扫码登录", ui.ToastWarning)
+				a.loadDiscover()
+			default:
+				// A network failure says nothing about the login: keep it.
+			}
+		})
+		a.invalidate()
+		return nil
+	}, nil)
+}
