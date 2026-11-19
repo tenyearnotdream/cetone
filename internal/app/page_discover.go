@@ -28,7 +28,7 @@ func (a *App) discoverPage(c ui.C) {
 	ui.Scroll(c).Fill().Children(func() {
 		ui.Column(c).FillWidth().Pad(24).Gap(24).Children(func() {
 			if a.user.UserID != 0 {
-				ui.Row(c).FillWidth().Gap(12).Items(ui.Center).Children(func() {
+				a.oceanHero(c, func() {
 					a.avatar(c, a.user.AvatarURL, a.user.Nickname, 44)
 					ui.Column(c).Gap(2).Children(func() {
 						ui.Textf(c, "晚上好，%s", a.user.Nickname).FontSize(20).Weight(gfx.WeightMedium)
@@ -122,7 +122,13 @@ func (a *App) carousel(c ui.C, data *discoverData) {
 			// whole picture rather than a squashed or cropped one.
 			ui.Image(c, bitmap).Fill()
 		} else {
-			ui.Row(c).Fill().Gradient(ui.ToRight, theme.Primary, theme.Accent)
+			// The banner's own picture has not arrived: the placeholder is the sea
+			// the icon is drawn in, cyan into deep blue.
+			from, to := gfx.RGB24(colorCyan), gfx.RGB24(colorDeep)
+			if isDark(*theme) {
+				from, to = gfx.RGB24(0x0E4E73), gfx.RGB24(0x081B2A)
+			}
+			ui.Row(c).Fill().Gradient(ui.ToRight, from, to)
 		}
 		// The caption sits in a scrim at the foot of the image: a translucent
 		// fill under a borderless line, so it reads on any artwork.

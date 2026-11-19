@@ -22,7 +22,10 @@ func Run(base app.Config, paths store.Paths) error {
 	}
 	// The desktop shows this picture on the taskbar and in Alt+Tab; without it
 	// the window wears the framework's default.
-	if icon, err := windowIcon(); err == nil {
+	// The icon follows the appearance: the dark tile on a dark taskbar, the pale
+	// one on a pale taskbar.
+	a.applyTheme()
+	if icon, err := a.windowIcon(); err == nil {
 		base.Icon = icon
 	}
 	return app.RunApplication(func(application *app.Application) error {
@@ -38,6 +41,10 @@ func Run(base app.Config, paths store.Paths) error {
 			// The cookies the server set during this run are what the next start
 			// needs; saving them here is what makes the login remembered.
 			a.persistSession()
+			if a.stopAppearance != nil {
+				a.stopAppearance()
+				a.stopAppearance = nil
+			}
 			a.stopTray()
 			a.stopMPRIS()
 			application.Quit()
@@ -52,6 +59,7 @@ func Run(base app.Config, paths store.Paths) error {
 		// on it has somewhere to show.
 		a.startTray()
 		a.startMPRIS()
+		a.watchAppearance()
 		a.restoreQueue()
 		// A saved login is checked against the server, so an expired one shows
 		// as expired instead of as an account nothing works for.
@@ -124,7 +132,7 @@ func (a *App) page(c ui.C) {
 				a.queueSidebar(c)
 			}
 		})
-		ui.Divider(c)
+		oceanStrip(c)
 		a.playerBar(c)
 	})
 

@@ -185,7 +185,7 @@ func (a *App) songRow(c ui.C, list songList, index int) {
 	row.Children(func() {
 		// The index, or the playing marker on the current song.
 		if isCurrent {
-			ui.Icon(c, iconWave).Size(14, 14).Color(theme.Primary)
+			ui.Icon(c, iconWave).Size(14, 14).Color(brandTint(*theme, isDark(*theme)))
 		} else {
 			ui.Textf(c, "%d", index+1).FontSize(12).Muted().Mono().Width(28)
 		}

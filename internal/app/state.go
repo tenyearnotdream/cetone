@@ -112,9 +112,18 @@ type App struct {
 	application   *app.Application
 	mprisServer   mprisServer
 	quitRequested bool
+	// stopAppearance ends the desktop appearance watch, when one is running.
+	stopAppearance func()
+
+	// theme is what the window paints with. It is a field, not a value built per
+	// call, because the page keeps a pointer to it: reassigning it is how a theme
+	// change reaches the screen.
+	theme gfx.Theme
+
 	// brand is the application's icon, decoded once for the page's header.
 	brand struct {
 		Decoded bool
+		Dark    bool
 		Bitmap  gfx.Bitmap
 	}
 
@@ -267,16 +276,128 @@ func (a *App) SetInvalidator(inv *app.Invalidator) { a.inv = inv }
 // themeConfig is the page's theme configuration: an explicit theme the user
 // chose, or none at all with the system appearance followed, which is what
 // "自适应皮肤" means.
+//
+// The page is given &a.theme, a field of the model, not a local: a theme built on
+// the stack lives only as long as the call that built it, and a setting changed
+// later would change the file while the window kept painting the old theme.
 func (a *App) themeConfig() (*gfx.Theme, bool) {
+	a.applyTheme()
+	return &a.theme, false
+}
+
+// applyTheme recomputes the theme the window paints from the setting. It is
+// called when the page is built and again whenever the setting changes.
+//
+// "system" is resolved here rather than left to the page's FollowSystemTheme,
+// because the application paints with colors of its own: a theme the framework
+// picks by itself would lose them. The watch below moves the same field when the
+// desktop switches.
+func (a *App) applyTheme() {
+	dark := false
 	switch a.config.Theme {
 	case "dark":
-		theme := gfx.DarkTheme()
-		return &theme, false
+		dark = true
 	case "light":
-		theme := gfx.LightTheme()
-		return &theme, false
+		dark = false
+	default:
+		dark = app.SystemAppearance() == app.AppearanceDark
 	}
-	return nil, true
+	if dark {
+		a.theme = a.decorate(gfx.DarkTheme(), true)
+		return
+	}
+	a.theme = a.decorate(gfx.LightTheme(), false)
+}
+
+// watchAppearance repaints in the other theme when the desktop switches, while
+// the setting says to follow it. It runs only under "system": a fixed theme is
+// the user's answer, and a switch must not override it.
+func (a *App) watchAppearance() {
+	a.stopAppearance = app.WatchSystemAppearance(func() {
+		if a.config.Theme != "system" && a.config.Theme != "" {
+			return
+		}
+		a.applyTheme()
+		a.invalidate()
+	})
+}
+
+// The application's own palette, taken from the icon: the whale is drawn in
+// three blues on near-black, and the window uses the same water.
+//
+//	cyan   #18D8F0  the whale's rim light
+//	blue   #0090F0  its body
+//	deep   #0048A8  the note
+//	abyss  #0B1A26  the sea at night
+//	foam   #F2F9FF  the light on the surface
+const (
+	colorCyan  = 0x18D8F0
+	colorBlue  = 0x0090F0
+	colorDeep  = 0x0048A8
+	colorAbyss = 0x0B1A26
+	colorFoam  = 0xF2F9FF
+	colorShore = 0x06243B
+)
+
+// decorate returns the theme with the application's own colors. Only the tokens
+// that carry the brand change; the neutrals stay the framework's, so contrast,
+// the control recipes and the dark/light switch keep working.
+//
+// The dark appearance is the sea at night: a deep blue-black, cyan accents, and
+// text that keeps its contrast. The light one is the same water under a bright
+// sky: white and pale blue surfaces, the deep blue carrying the accent so it
+// stays readable on white.
+func (a *App) decorate(theme gfx.Theme, dark bool) gfx.Theme {
+	if dark {
+		theme.Background = gfx.RGB24(0x07131C)
+		theme.Foreground = gfx.RGB24(0xE6F4FF)
+		theme.Card = gfx.RGB24(0x0B1A26)
+		theme.CardForeground = gfx.RGB24(0xE6F4FF)
+		theme.CardElevated = gfx.RGB24(0x102432)
+		theme.Popover = gfx.RGB24(0x0E2030)
+		theme.PopoverForeground = gfx.RGB24(0xE6F4FF)
+		theme.Muted = gfx.RGB24(0x13293A)
+		theme.MutedForeground = gfx.RGB24(0x8FB3CB)
+		theme.Border = gfx.RGB24(0x1B3A50)
+		theme.Hover = gfx.RGB24(0x122A3B)
+		theme.Input = gfx.RGB24(0x1B3A50)
+		theme.Primary = gfx.RGB24(colorBlue)
+		theme.PrimaryForeground = gfx.RGB24(0x04121F)
+		theme.Secondary = gfx.RGB24(0x143247)
+		theme.SecondaryForeground = gfx.RGB24(0xD8ECFA)
+		theme.Accent = gfx.RGB24(0x123044)
+		theme.AccentForeground = gfx.RGB24(0xD8ECFA)
+		theme.Selection = gfx.RGB24(0x10425F)
+		theme.SelectionForeground = gfx.RGB24(0xEAF7FF)
+		theme.Ring = gfx.RGB24(colorCyan)
+		theme.Success = gfx.RGB24(0x2FD4A0)
+		theme.Danger = gfx.RGB24(0xFF6B7A)
+		return theme
+	}
+	theme.Background = gfx.RGB24(0xFAFDFF)
+	theme.Foreground = gfx.RGB24(0x081C2B)
+	theme.Card = gfx.RGB24(0xFFFFFF)
+	theme.CardForeground = gfx.RGB24(0x081C2B)
+	theme.CardElevated = gfx.RGB24(0xF1F8FD)
+	theme.Popover = gfx.RGB24(0xFFFFFF)
+	theme.PopoverForeground = gfx.RGB24(0x081C2B)
+	theme.Muted = gfx.RGB24(0xEAF4FB)
+	theme.MutedForeground = gfx.RGB24(0x5B7C93)
+	theme.Border = gfx.RGB24(0xD5E7F3)
+	theme.Hover = gfx.RGB24(0xF0F8FD)
+	theme.Input = gfx.RGB24(0xD5E7F3)
+	theme.Primary = gfx.RGB24(colorDeep)
+	theme.PrimaryForeground = gfx.RGB24(colorFoam)
+	theme.Secondary = gfx.RGB24(0xE8F4FC)
+	theme.SecondaryForeground = gfx.RGB24(colorShore)
+	theme.Accent = gfx.RGB24(0xE4F3FD)
+	theme.AccentForeground = gfx.RGB24(colorShore)
+	theme.Selection = gfx.RGB24(0xCCE8F9)
+	theme.SelectionForeground = gfx.RGB24(colorShore)
+	theme.Ring = gfx.RGB24(colorBlue)
+	theme.Success = gfx.RGB24(0x0F9D6E)
+	theme.Danger = gfx.RGB24(0xD92B45)
+	return theme
 }
 
 // sync runs the closures workers published. The page calls it before declaring

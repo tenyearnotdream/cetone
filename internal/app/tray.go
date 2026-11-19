@@ -30,11 +30,19 @@ import (
 // the densest bars, and the platform scales it down to its own size.
 const trayIconSize = 32
 
+// iconPNG is the artwork for the current appearance.
+func (a *App) iconPNG() []byte {
+	if a.theme.Background.Red+a.theme.Background.Green+a.theme.Background.Blue > 1.5 {
+		return assets.IconLightPNG
+	}
+	return assets.IconPNG
+}
+
 // startTray exports the status item. It is called on the application's startup
 // thread, and a machine with no status area is not an error: the program simply
 // has no tray, and closing the window quits.
 func (a *App) startTray() {
-	icon, err := statusIconFromPNG(assets.IconPNG, trayIconSize)
+	icon, err := statusIconFromPNG(a.iconPNG(), trayIconSize)
 	if err != nil {
 		a.trayErr = err
 		return
@@ -62,12 +70,16 @@ func (a *App) startTray() {
 	a.updateTray()
 }
 
-// updateTray refreshes what the item says without opening it.
+// updateTray refreshes what the item shows without opening it.
 func (a *App) updateTray() {
 	if a.tray == nil {
 		return
 	}
 	a.tray.SetTooltip(a.trayTooltip())
+	// The tile follows the appearance, as the window icon does.
+	if icon, err := statusIconFromPNG(a.iconPNG(), trayIconSize); err == nil {
+		_ = a.tray.SetIcon(icon)
+	}
 }
 
 // trayTooltip is the song the pointer resting on the icon reads.
@@ -192,11 +204,15 @@ func (a *App) stopTray() {
 // brandBitmap is the application's icon as a bitmap for the page's own header.
 // It is decoded once: the header is declared on every frame.
 func (a *App) brandBitmap() gfx.Bitmap {
-	if a.brand.Decoded {
+	// The header shows the icon of the current appearance, so a theme change
+	// drops the decoded copy.
+	dark := isDark(a.theme)
+	if a.brand.Decoded && a.brand.Dark == dark {
 		return a.brand.Bitmap
 	}
 	a.brand.Decoded = true
-	src, _, err := image.Decode(bytes.NewReader(assets.IconPNG))
+	a.brand.Dark = dark
+	src, _, err := image.Decode(bytes.NewReader(a.iconPNG()))
 	if err != nil {
 		return gfx.Bitmap{}
 	}
@@ -209,8 +225,8 @@ func (a *App) brandBitmap() gfx.Bitmap {
 // windowIcon is the application's picture for the taskbar and Alt+Tab: the same
 // artwork as the status item, at the size a desktop shows large icons. A failure
 // to read it is not fatal: the window opens with the desktop's default icon.
-func windowIcon() (app.WindowIcon, error) {
-	src, _, err := image.Decode(bytes.NewReader(assets.IconPNG))
+func (a *App) windowIcon() (app.WindowIcon, error) {
+	src, _, err := image.Decode(bytes.NewReader(a.iconPNG()))
 	if err != nil {
 		return app.WindowIcon{}, fmt.Errorf("窗口图标无法解码：%w", err)
 	}

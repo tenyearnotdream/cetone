@@ -188,6 +188,12 @@ func (a *App) settingsPage(c ui.C) {
 					themeSelect.Label("主题")
 					if themeSelect.Changed() {
 						a.config.Theme = theme
+						a.applyTheme()
+						// The tray icon follows at once; the window's taskbar picture
+						// is set when the window is created (Viva has no call to
+						// replace a running window's icon), so it follows on the next
+						// start.
+						a.updateTray()
 						a.saveConfig()
 						a.invalidate()
 					}

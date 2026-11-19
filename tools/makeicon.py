@@ -148,3 +148,53 @@ for size in SIZES:
 # The embedded copy is drawn by the window and scaled down to the status area.
 premultiplied_resize(out, 512).save(OUT_EMBED)
 print(f"embedded -> {OUT_EMBED}")
+
+
+# 4. Two variants of the same artwork.
+#
+# The drawing is a blue whale on a near-black rounded tile. On a dark taskbar or
+# panel the tile merges with the bar and only the bright rim reads; on a pale one
+# it is a heavy black block. So the same artwork ships twice: the tile as drawn,
+# and the tile repainted pale.
+#
+# The repaint is safe because the artwork's own darks are blue (measured: every
+# dark pixel inside the whale is saturated, none is neutral black), so
+# "neutral and dark" is exactly the tile and nothing else.
+def light_variant(image):
+    w, h = image.size
+    src = image.load()
+    out = Image.new("RGBA", (w, h))
+    px = out.load()
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = src[x, y]
+            if a == 0:
+                continue
+            mx, mn = max(r, g, b), min(r, g, b)
+            neutral = (mx - mn) <= 24
+            if neutral:
+                # The tile: a pale sea, slightly deeper at the bottom, so the
+                # whale still sits on water rather than on a flat sheet.
+                t = y / max(h - 1, 1)
+                top = (232, 245, 253)     # #E8F5FD
+                bottom = (198, 228, 247)  # #C6E4F7
+                px[x, y] = (
+                    int(top[0] + (bottom[0] - top[0]) * t),
+                    int(top[1] + (bottom[1] - top[1]) * t),
+                    int(top[2] + (bottom[2] - top[2]) * t),
+                    a,
+                )
+            else:
+                px[x, y] = (r, g, b, a)
+    return out
+
+light = light_variant(out)
+light.save("artwork/icon-light.png")
+print("artwork/icon-light.png")
+
+for size in SIZES:
+    target = os.path.join(OUT_SET, f"{size}x{size}", "apps")
+    os.makedirs(target, exist_ok=True)
+    premultiplied_resize(light, size).save(os.path.join(target, "cetone-light.png"))
+premultiplied_resize(light, 512).save("internal/assets/icon-light.png")
+print("internal/assets/icon-light.png")
