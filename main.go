@@ -18,8 +18,11 @@ import (
 	"cetone/internal/store"
 )
 
-// version is reported by --version and in the window's title.
-const version = "1.0.0"
+// version is reported by --version. It is kept in step with viva.toml by
+// tools/setversion.sh, which the release workflow runs before packaging: a
+// program that reports a different version from the package it came in is a bug
+// report waiting to happen.
+const version = "1.0.1"
 
 func main() {
 	if len(os.Args) > 1 {

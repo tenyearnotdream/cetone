@@ -48,11 +48,11 @@ jobs:
       # tar.gz (an install script) and deb. Writing the version into viva.toml
       # keeps the package metadata and the tag in step; the file stays the
       # source of truth for everything else.
+      # The one place the version is set: it writes viva.toml (the package
+      # metadata) and main.go (what the program prints for --version), so the
+      # two cannot disagree.
       - name: Set the version
-        run: |
-          v="${VERSION#v}"
-          sed -i "s/^version = .*/version = \"$v\"/" viva.toml
-          grep -E '^(name|version|id) ' viva.toml
+        run: tools/setversion.sh "${VERSION}"
 
       - name: Package
         run: go tool viva package --target linux --arch ${{ matrix.arch }} --format tar.gz,deb
@@ -78,11 +78,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The one place the version is set: it writes viva.toml (the package
+      # metadata) and main.go (what the program prints for --version), so the
+      # two cannot disagree.
       - name: Set the version
-        run: |
-          v="${VERSION#v}"
-          sed -i "s/^version = .*/version = \"$v\"/" viva.toml
-          grep -E '^(name|version|id) ' viva.toml
+        run: tools/setversion.sh "${VERSION}"
 
       # A zip of the program and its libraries. The NSIS installer needs
       # makensis, which the windows-latest image carries but this one does not;
@@ -111,10 +111,7 @@ jobs:
           cache: true
 
       - name: Set the version
-        run: |
-          v="${VERSION#v}"
-          sed -i '' "s/^version = .*/version = \"$v\"/" viva.toml
-          grep -E '^(name|version|id) ' viva.toml
+        run: tools/setversion.sh "${VERSION}"
 
       # .app in a zip is what a user without a Developer ID can open with a
       # right click; a .dmg needs no signing either but is one more thing to
