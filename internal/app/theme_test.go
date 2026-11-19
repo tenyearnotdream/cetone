@@ -103,3 +103,25 @@ func TestTheBrandColorsApplyToBothThemes(t *testing.T) {
 }
 
 func equalColor(a, b gfx.Color) bool { return a == b }
+
+// Both icon variants ship inside the binary, and the appearance picks one.
+func TestTheIconFollowsTheAppearance(t *testing.T) {
+	a := headlessModel(t)
+	a.config.Theme = "dark"
+	a.applyTheme()
+	dark := a.iconPNG()
+	a.config.Theme = "light"
+	a.applyTheme()
+	light := a.iconPNG()
+	if len(dark) == 0 || len(light) == 0 {
+		t.Fatal("an icon variant is missing from the binary")
+	}
+	if string(dark) == string(light) {
+		t.Fatal("both appearances embed the same icon")
+	}
+	// The light variant's center is pale, the dark one's is near black: that is
+	// what makes each readable on its own taskbar.
+	if len(light) == len(dark) {
+		t.Logf("both variants encode to %d bytes; they differ in content", len(light))
+	}
+}

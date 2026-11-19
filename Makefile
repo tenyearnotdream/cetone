@@ -48,10 +48,16 @@ ICON_SIZES := 16 22 24 32 48 64 96 128 256 512 1024
 icons:
 	python3 tools/makeicon.py
 
+# Both variants: the dark tile the icon was drawn on, and the pale one. `viva
+# package` ships a single icon (the one [app] icon names), so a packaged build
+# carries the dark tile for the launcher and the application itself selects either
+# at run time for its window and tray icons.
 install-icons:
 	for size in $(ICON_SIZES); do \
 		install -Dm644 icons/hicolor/$${size}x$${size}/apps/cetone.png \
 			/usr/share/icons/hicolor/$${size}x$${size}/apps/cetone.png; \
+		install -Dm644 icons/hicolor/$${size}x$${size}/apps/cetone-light.png \
+			/usr/share/icons/hicolor/$${size}x$${size}/apps/cetone-light.png; \
 	done
 	gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
 
