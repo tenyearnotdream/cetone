@@ -50,7 +50,15 @@ func initials(name string) string {
 // loads. The caller gives it the size it should take.
 func (a *App) coverBox(c ui.C, rawURL, fallback string, size float32) ui.Box {
 	theme := c.Theme()
-	box := ui.Row(c).Size(size, size).Radius(theme.Metrics.RadiusSurface).Clip().Background(theme.Muted).Shrink(0)
+	// A cover that has not arrived sits on a pale sea tile rather than on grey,
+	// so an empty grid still looks like the application.
+	placeholder := theme.Muted
+	if isDark(*theme) {
+		placeholder = gfx.RGB24(0x0E2A3D)
+	} else {
+		placeholder = gfx.RGB24(0xE3F0F9)
+	}
+	box := ui.Row(c).Size(size, size).Radius(theme.Metrics.RadiusSurface).Clip().Background(placeholder).Shrink(0)
 	box.Children(func() {
 		if bitmap := a.coverBitmap(rawURL, int(size*2)); bitmap.Width > 0 {
 			ui.Image(c, bitmap).Size(size, size)
@@ -144,16 +152,17 @@ type songList struct {
 	onAlbum func(index int)
 }
 
-// songList declares a scrolling track list with a header row.
+// songList declares a scrolling track list with a header row. The list sits
+// directly on the sea: the rows and the header have no surface of their own, so
+// the texture reads through them.
 func (a *App) songList(c ui.C, list songList) {
-	theme := c.Theme()
 	ui.Column(c).Fill().Children(func() {
 		if len(list.songs) == 0 {
 			emptyState(c, iconLyrics, "还没有歌曲", "这个列表里没有可显示的内容")
 			return
 		}
 		// Column titles, aligned with the rows below.
-		ui.Row(c).FillWidth().Height(32).PadX(16).Gap(12).Items(ui.Center).Background(theme.Background).Children(func() {
+		ui.Row(c).FillWidth().Height(32).PadX(16).Gap(12).Items(ui.Center).Children(func() {
 			ui.Text(c, "#").FontSize(11).Muted().Width(28)
 			ui.Text(c, "标题").FontSize(11).Muted().Grow(1)
 			if list.showAlbum {

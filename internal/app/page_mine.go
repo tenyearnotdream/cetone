@@ -76,7 +76,7 @@ func (a *App) minePage(c ui.C) {
 func (a *App) mineTile(c ui.C, icon gfx.Icon, label string, count int, onClick func()) {
 	theme := c.Theme()
 	tile := ui.Row(c).Width(220).Pad(14).Gap(12).Radius(theme.Metrics.RadiusSurface).
-		Background(theme.Card).Border(1, theme.Border).Items(ui.Center)
+		Background(glass(*theme)).Border(1, glassBorder(*theme)).Items(ui.Center)
 	tile.Hit(ui.ID(c), label)
 	tile.Hover(ui.Look{}.Background(theme.Hover))
 	tile.Children(func() {
@@ -332,7 +332,7 @@ func (a *App) trayProblemText() string {
 func (a *App) settingsCard(c ui.C, title string, body func()) {
 	theme := c.Theme()
 	ui.Column(c).FillWidth().Pad(16).Gap(12).Radius(theme.Metrics.RadiusSurface).
-		Background(theme.Card).Border(1, theme.Border).Children(func() {
+		Background(glass(*theme)).Border(1, glassBorder(*theme)).Children(func() {
 		ui.Text(c, title).FontSize(14).Weight(gfx.WeightMedium)
 		body()
 	})

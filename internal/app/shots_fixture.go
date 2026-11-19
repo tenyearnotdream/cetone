@@ -66,9 +66,11 @@ func NewWithFixture(paths store.Paths) *App {
 	return a
 }
 
-// SetThemeForShots fixes the appearance for a screenshot pair.
+// SetThemeForShots fixes the appearance for a screenshot pair. It applies it the
+// way the settings page does, so a screenshot shows what a user would see.
 func (a *App) SetThemeForShots(theme string) {
 	a.config.Theme = theme
+	a.applyTheme()
 }
 
 // SyncForShots runs the window-thread closures a worker published.

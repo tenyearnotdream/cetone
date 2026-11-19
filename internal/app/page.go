@@ -114,26 +114,31 @@ func (a *App) page(c ui.C) {
 		}
 	}
 
-	theme := c.Theme()
 	// The shell is a fixed frame: the content takes the room the bar and the
 	// dividers leave, so a long page scrolls inside it instead of pushing the
 	// player off the bottom of the window.
-	ui.Column(c).Fill().Background(theme.Background).Children(func() {
-		ui.Row(c).FillWidth().FillHeight().Children(func() {
-			a.sidebar(c)
-			ui.Column(c).Grow(1).FillHeight().Children(func() {
-				a.header(c)
-				ui.Divider(c)
+	ui.Stack(c).Fill().Children(func() {
+		// The sea is one picture under everything: contour lines, the dot grid
+		// and the ambient light, drawn once per appearance rather than declared
+		// as elements that every hover would re-tessellate.
+		ui.Image(c, a.oceanBitmap()).Fill()
+		ui.Column(c).Fill().Children(func() {
+			ui.Row(c).FillWidth().FillHeight().Children(func() {
+				a.sidebar(c)
 				ui.Column(c).Grow(1).FillHeight().Children(func() {
-					a.content(c)
+					a.header(c)
+					ui.Divider(c)
+					ui.Column(c).Grow(1).FillHeight().Children(func() {
+						a.content(c)
+					})
 				})
+				if a.queuePanel {
+					a.queueSidebar(c)
+				}
 			})
-			if a.queuePanel {
-				a.queueSidebar(c)
-			}
+			oceanStrip(c)
+			a.playerBar(c)
 		})
-		oceanStrip(c)
-		a.playerBar(c)
 	})
 
 	a.loginModal(c)
@@ -156,7 +161,8 @@ func (a *App) sidebar(c ui.C) {
 	theme := c.Theme()
 	// The rail keeps its width: the content beside it is what gives way when a
 	// page's cards are wide.
-	rail := ui.Column(c).Width(212).MinWidth(212).Shrink(0).FillHeight().Pad(12).Gap(4).Background(theme.Card)
+	rail := ui.Column(c).Width(212).MinWidth(212).Shrink(0).FillHeight().Pad(12).Gap(4)
+	rail = glassPanel(rail, *theme)
 	rail.Children(func() {
 		ui.Row(c).Gap(10).Items(ui.Center).PadSides(8, 8, 14, 8).Children(func() {
 			// The application's own icon, decoded once and kept: the rail is
@@ -237,7 +243,9 @@ func (a *App) userBadge(c ui.C) {
 // queue toggle.
 func (a *App) header(c ui.C) {
 	theme := c.Theme()
-	ui.Row(c).FillWidth().Height(52).PadX(16).Gap(10).Items(ui.Center).Background(theme.Background).Children(func() {
+	header := ui.Row(c).FillWidth().Height(52).PadX(16).Gap(10).Items(ui.Center)
+	header = glassPanel(header, *theme)
+	header.Children(func() {
 		if len(a.nav) > 1 {
 			back := ui.Button(c, "").Icon(iconBack).IconOnly().Ghost().Tooltip("返回")
 			back.Label("返回")
@@ -334,7 +342,9 @@ func (a *App) playerBar(c ui.C) {
 	song, hasSong := a.current()
 	busy := snapshot.Status == player.StatusBuffering
 
-	ui.Row(c).FillWidth().Height(84).PadSides(12, 16, 12, 12).Gap(14).Items(ui.Center).Background(theme.Card).Children(func() {
+	bar := ui.Row(c).FillWidth().Height(84).PadSides(12, 16, 12, 12).Gap(14).Items(ui.Center)
+	bar = glassPanel(bar, *theme)
+	bar.Children(func() {
 		// The cover and the title open the lyrics page, as a click on the art
 		// does in the GTK client.
 		art := ui.Row(c).Size(56, 56).Radius(theme.Metrics.RadiusControl).Clip()
@@ -510,7 +520,9 @@ func (a *App) saveAndToast(title, body string) {
 // queueSidebar is the play queue panel on the right.
 func (a *App) queueSidebar(c ui.C) {
 	theme := c.Theme()
-	ui.Column(c).Width(320).FillHeight().Background(theme.Card).Children(func() {
+	panel := ui.Column(c).Width(320).FillHeight()
+	panel = glassPanel(panel, *theme)
+	panel.Children(func() {
 		ui.Row(c).FillWidth().PadSides(16, 12, 12, 16).Gap(8).Items(ui.Center).Children(func() {
 			ui.Textf(c, "播放列表 (%d)", len(a.queue)).FontSize(13).Bold()
 			ui.Spacer(c)

@@ -80,7 +80,7 @@ func (a *App) lyricsPage(c ui.C, songID int64) {
 // lyricAside is the right-hand panel of the lyric view: art, title, facts.
 func (a *App) lyricAside(c ui.C, song ncm.Song) {
 	theme := c.Theme()
-	ui.Column(c).Width(320).FillHeight().Pad(24).Gap(12).Items(ui.Center).Background(theme.Card).Children(func() {
+	glassPanel(ui.Column(c).Width(320).FillHeight().Pad(24).Gap(12), *theme).Items(ui.Center).Children(func() {
 		a.coverBox(c, ncm.CoverURL(song.Album.PicURL, 500), song.Name, 240)
 		ui.Text(c, song.Name).FontSize(16).Bold().TextCenter().MaxLines(2)
 		ui.Text(c, song.Singer()).FontSize(12).Muted().TextCenter()

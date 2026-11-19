@@ -115,6 +115,9 @@ type App struct {
 	// stopAppearance ends the desktop appearance watch, when one is running.
 	stopAppearance func()
 
+	// ocean is the background texture, drawn once per appearance.
+	ocean oceanTexture
+
 	// theme is what the window paints with. It is a field, not a value built per
 	// call, because the page keeps a pointer to it: reassigning it is how a theme
 	// change reaches the screen.

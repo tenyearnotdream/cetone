@@ -43,7 +43,7 @@ func (a *App) discoverPage(c ui.C) {
 					}
 				})
 			} else {
-				ui.Row(c).FillWidth().Pad(20).Gap(16).Radius(theme.Metrics.RadiusSurface).Background(theme.Card).Items(ui.Center).Children(func() {
+				glassPanel(ui.Row(c).FillWidth().Pad(20).Gap(16).Radius(theme.Metrics.RadiusSurface), *theme).Items(ui.Center).Children(func() {
 					ui.Column(c).Gap(4).Grow(1).Children(func() {
 						ui.Text(c, "登录后同步你的音乐").FontSize(18).Weight(gfx.WeightMedium)
 						ui.Text(c, "我喜欢的音乐、每日推荐和云盘都会出现在这里；VIP 失效前缓存的歌曲仍然可以离线播放。").FontSize(12).Muted().MaxLines(2)
@@ -133,13 +133,13 @@ func (a *App) carousel(c ui.C, data *discoverData) {
 		// The caption sits in a scrim at the foot of the image: a translucent
 		// fill under a borderless line, so it reads on any artwork.
 		ui.Row(c).Absolute().Left(0).Right(0).Bottom(0).Height(44).PadX(20).Items(ui.Center).
-			Background(theme.Card).Opacity(0.92).Children(func() {
+			Background(glass(*theme)).Opacity(0.94).Children(func() {
 			ui.Text(c, banner.Title).FontSize(14).Weight(gfx.WeightMedium).Color(theme.Foreground).Ellipsis()
 			ui.Spacer(c)
 			ui.Text(c, "点击查看").FontSize(11).Muted()
 		})
 		next := ui.Row(c).Size(32, 32).Radius(16).Absolute().Right(12).Top(74).Opacity(0.85)
-		next.Background(theme.Card).Center()
+		next.Background(glass(*theme)).Border(1, glassBorder(*theme)).Center()
 		next.Hit(ui.ID(c), "下一张推荐")
 		next.Children(func() {
 			ui.Icon(c, iconChevronRight).Size(16, 16).Color(theme.Foreground)
@@ -171,15 +171,23 @@ func (a *App) carousel(c ui.C, data *discoverData) {
 func (a *App) dailyCard(c ui.C, index int) {
 	song := a.data.mine.daily[index]
 	theme := c.Theme()
-	card := ui.Column(c).Width(148).Gap(4)
-	card.Radius(theme.Metrics.RadiusControl)
+	// A card on the sea: a lifted glass tile, its cover, and its two lines.
+	// The card is as tall as its parts: cover, then the two lines with their own
+	// padding. The width is the cover's plus the card's padding.
+	const cover = 132
+	const pad = 6
+	card := glassPanel(ui.Column(c).Width(cover+pad*2).Gap(6), *theme)
+	card.Radius(theme.Metrics.RadiusSurface)
+	card.Pad(pad)
+	card.Shadow(gfx.ShadowXS)
 	card.Hit(ui.ID(c), song.Name)
-	card.Hover(ui.Look{}.Background(theme.Hover))
-	card.Pad(4)
+	card.Hover(ui.Look{}.Background(theme.Hover).Shadow(gfx.ShadowMD))
 	card.Children(func() {
-		a.coverBox(c, ncm.CoverURL(song.Album.PicURL, 200), song.Name, 140)
-		ui.Text(c, song.Name).FontSize(12).Ellipsis()
-		ui.Text(c, song.Singer()).FontSize(10).Muted().Ellipsis()
+		a.coverBox(c, ncm.CoverURL(song.Album.PicURL, 200), song.Name, cover)
+		ui.Column(c).PadX(2).Gap(1).Children(func() {
+			ui.Text(c, song.Name).FontSize(12).Ellipsis()
+			ui.Text(c, song.Singer()).FontSize(10).Muted().Ellipsis()
+		})
 	})
 	if card.Clicked() {
 		a.playSongs(a.data.mine.daily, index)

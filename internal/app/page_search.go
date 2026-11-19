@@ -165,7 +165,7 @@ func (a *App) searchLanding(c ui.C) {
 // shortcutCard is one of the landing page's buttons.
 func (a *App) shortcutCard(c ui.C, icon gfx.Icon, label string, onClick func()) {
 	theme := c.Theme()
-	card := ui.Row(c).Width(160).Pad(12).Gap(10).Radius(theme.Metrics.RadiusControl).Background(theme.Card).Items(ui.Center)
+	card := glassPanel(ui.Row(c).Width(160).Pad(12).Gap(10).Radius(theme.Metrics.RadiusControl), *theme).Items(ui.Center)
 	card.Hit(ui.ID(c), label)
 	card.Hover(ui.Look{}.Background(theme.Hover))
 	card.Children(func() {

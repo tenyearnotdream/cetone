@@ -84,3 +84,29 @@ func contrast(a, b gfx.Color) float64 {
 	}
 	return (la + 0.05) / (lb + 0.05)
 }
+
+// glass is a translucent panel over the ocean: the card color at a partial
+// alpha, with a 1px translucent border of the accent color. The texture shows
+// through it, which is what makes the window read as one surface rather than as
+// panels stacked on a color.
+func glass(theme gfx.Theme) gfx.Color {
+	if isDark(theme) {
+		return theme.Card.WithAlpha(0.70)
+	}
+	return theme.Card.WithAlpha(0.80)
+}
+
+// glassBorder is the hairline around a glass panel.
+func glassBorder(theme gfx.Theme) gfx.Color {
+	if isDark(theme) {
+		return gfx.RGB24(colorBlue).WithAlpha(0.22)
+	}
+	return gfx.RGB24(0x38BDF8).WithAlpha(0.28)
+}
+
+// glassPanel dresses a box as a glass card.
+func glassPanel(box ui.Box, theme gfx.Theme) ui.Box {
+	box.Background(glass(theme))
+	box.Border(1, glassBorder(theme))
+	return box
+}
