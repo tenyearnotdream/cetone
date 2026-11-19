@@ -331,8 +331,17 @@ func (a *App) trayProblemText() string {
 // light theme, so the line is what makes the group read as a group.
 func (a *App) settingsCard(c ui.C, title string, body func()) {
 	theme := c.Theme()
-	ui.Column(c).FillWidth().Pad(16).Gap(12).Radius(theme.Metrics.RadiusSurface).
-		Background(glass(*theme)).Border(1, glassBorder(*theme)).Children(func() {
+	card := ui.Column(c).FillWidth().Pad(16).Gap(12).Radius(theme.Metrics.RadiusSurface)
+	card.Background(glass(*theme))
+	card.Border(1, glassBorder(*theme))
+	// A soft shadow under a pale panel is what separates it from a pale sea; the
+	// line alone would be the only edge and so had to be heavy.
+	if isDark(*theme) {
+		card.Shadow(gfx.ShadowSM)
+	} else {
+		card.Shadow(gfx.ShadowXS)
+	}
+	card.Children(func() {
 		ui.Text(c, title).FontSize(14).Weight(gfx.WeightMedium)
 		body()
 	})

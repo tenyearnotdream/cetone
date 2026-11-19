@@ -22,12 +22,7 @@ func Run(base app.Config, paths store.Paths) error {
 	}
 	// The desktop shows this picture on the taskbar and in Alt+Tab; without it
 	// the window wears the framework's default.
-	// The icon follows the appearance: the dark tile on a dark taskbar, the pale
-	// one on a pale taskbar.
-	a.applyTheme()
-	if icon, err := a.windowIcon(); err == nil {
-		base.Icon = icon
-	}
+	base = a.WindowConfig(base)
 	return app.RunApplication(func(application *app.Application) error {
 		_, config := a.Page(base)
 		a.application = application
@@ -123,8 +118,10 @@ func (a *App) page(c ui.C) {
 		// as elements that every hover would re-tessellate.
 		ui.Image(c, a.oceanBitmap()).Fill()
 		ui.Column(c).Fill().Children(func() {
+			a.titlebar(c)
 			ui.Row(c).FillWidth().FillHeight().Children(func() {
 				a.sidebar(c)
+				ui.Divider(c)
 				ui.Column(c).Grow(1).FillHeight().Children(func() {
 					a.header(c)
 					ui.Divider(c)
@@ -161,8 +158,10 @@ func (a *App) sidebar(c ui.C) {
 	theme := c.Theme()
 	// The rail keeps its width: the content beside it is what gives way when a
 	// page's cards are wide.
+	// The rail is not a plate: the sea runs under it, and a hairline at its edge
+	// is what separates it from the content. A second translucent panel here
+	// would put a lighter rectangle on the sea for no reason.
 	rail := ui.Column(c).Width(212).MinWidth(212).Shrink(0).FillHeight().Pad(12).Gap(4)
-	rail = glassPanel(rail, *theme)
 	rail.Children(func() {
 		ui.Row(c).Gap(10).Items(ui.Center).PadSides(8, 8, 14, 8).Children(func() {
 			// The application's own icon, decoded once and kept: the rail is
@@ -242,9 +241,8 @@ func (a *App) userBadge(c ui.C) {
 // header is the bar above the content: back, the page title, search and the
 // queue toggle.
 func (a *App) header(c ui.C) {
-	theme := c.Theme()
+	// The header is chrome over the same sea, not a band of its own.
 	header := ui.Row(c).FillWidth().Height(52).PadX(16).Gap(10).Items(ui.Center)
-	header = glassPanel(header, *theme)
 	header.Children(func() {
 		if len(a.nav) > 1 {
 			back := ui.Button(c, "").Icon(iconBack).IconOnly().Ghost().Tooltip("返回")
@@ -342,8 +340,11 @@ func (a *App) playerBar(c ui.C) {
 	song, hasSong := a.current()
 	busy := snapshot.Status == player.StatusBuffering
 
+	// The player bar is a control surface, so it stays a panel; it is the one
+	// place a translucent plate is doing work rather than decorating.
 	bar := ui.Row(c).FillWidth().Height(84).PadSides(12, 16, 12, 12).Gap(14).Items(ui.Center)
-	bar = glassPanel(bar, *theme)
+	bar.Background(glass(*theme))
+	bar.Border(1, glassBorder(*theme))
 	bar.Children(func() {
 		// The cover and the title open the lyrics page, as a click on the art
 		// does in the GTK client.
@@ -555,4 +556,26 @@ func humanCount(n int64) string {
 		return fmt.Sprintf("%.1f万", float64(n)/10000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// WindowConfig is the window's own decoration: the icon of the current
+// appearance, and a title bar the page paints so the sea reaches the top edge.
+//
+// It is a method so a test can check what Run would open: a window that fell back
+// to the desktop's title bar is exactly the seam this is here to remove, and a
+// test that built its own config would not see it.
+func (a *App) WindowConfig(base app.Config) app.Config {
+	// The icon follows the appearance: the dark tile on a dark taskbar, the pale
+	// one on a pale taskbar.
+	a.applyTheme()
+	if icon, err := a.windowIcon(); err == nil {
+		base.Icon = icon
+	}
+	base.WindowMode = app.WindowCustomTitlebar
+	base.TitlebarHeight = titlebarHeight
+	base.ClearColor = a.clearColor()
+	// The buttons Viva draws in the strip are styled by a function, because the
+	// config asks it at every paint: they follow a theme change.
+	base.WindowControls = a.windowControlsStyle
+	return base
 }

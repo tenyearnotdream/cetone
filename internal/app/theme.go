@@ -85,23 +85,29 @@ func contrast(a, b gfx.Color) float64 {
 	return (la + 0.05) / (lb + 0.05)
 }
 
-// glass is a translucent panel over the ocean: the card color at a partial
-// alpha, with a 1px translucent border of the accent color. The texture shows
-// through it, which is what makes the window read as one surface rather than as
-// panels stacked on a color.
+// glass is a translucent panel over the ocean. The alpha is low enough that the
+// texture reads through it: a panel that hides the sea behind it turns the window
+// into three white plates on a picture, which is exactly the seam this is here to
+// avoid. A little of the card color is mixed in so text on a panel has a steadier
+// surface than the texture alone.
 func glass(theme gfx.Theme) gfx.Color {
 	if isDark(theme) {
-		return theme.Card.WithAlpha(0.70)
+		return gfx.RGB24(0x0B1A26).WithAlpha(0.55)
 	}
-	return theme.Card.WithAlpha(0.80)
+	return gfx.RGB24(0xFFFFFF).WithAlpha(0.46)
 }
 
-// glassBorder is the hairline around a glass panel.
+// glassBorder is the hairline around a glass panel. It is the accent color at a
+// low alpha: a frame in the accent color, drawn at full strength, is what makes a
+// panel look pasted on instead of part of the surface.
 func glassBorder(theme gfx.Theme) gfx.Color {
 	if isDark(theme) {
-		return gfx.RGB24(colorBlue).WithAlpha(0.22)
+		return gfx.RGB24(colorBlue).WithAlpha(0.10)
 	}
-	return gfx.RGB24(0x38BDF8).WithAlpha(0.28)
+	// A pale panel on a pale sea needs almost no outline: the shadow and the
+	// change of tone already separate it. A line any stronger reads as a box
+	// drawn around the content.
+	return gfx.RGB24(0x7FA8C4).WithAlpha(0.16)
 }
 
 // glassPanel dresses a box as a glass card.
