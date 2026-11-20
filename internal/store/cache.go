@@ -58,24 +58,44 @@ func (c *Cache) PartPath(songID int64, quality ncm.Quality) string {
 	return c.Path(songID, quality) + ".part"
 }
 
-// Lookup finds a cached file for the song at exactly the quality, then at any
-// other quality, since a lower tier is better than a song that will not play.
-// The second result is the quality that was found.
+// Lookup finds a cached file for the song at exactly the quality, then at the
+// closest other quality. The second result is the quality that was found.
+//
+// "Closest" rather than "best" is what keeps the answer predictable: a directory
+// holding a Hi-Res file must not answer a request for lossless with it, or the
+// setting would appear not to work and a 34 MB file would be preferred over the
+// 20 MB one that was asked for. The walk is the tiers at or above the request
+// from the nearest, then the tiers below it from the nearest, so the choice is
+// the least surprising file that plays.
 func (c *Cache) Lookup(songID int64, quality ncm.Quality) (string, ncm.Quality, bool) {
 	if path, ok := c.find(Name(songID, quality)); ok {
 		return path, quality, true
 	}
-	// Walk the other tiers, best first: a lossless file is playable at any
-	// setting, and a standard one is better than silence.
-	for _, q := range []ncm.Quality{ncm.QualityMaster, ncm.QualityAudioVivid, ncm.QualitySurround, ncm.QualityHiRes, ncm.QualityLossless, ncm.QualityExtreme, ncm.QualityHigher, ncm.QualityStandard} {
-		if q == quality {
-			continue
-		}
+	for _, q := range byCloseness(quality) {
 		if path, ok := c.find(Name(songID, q)); ok {
 			return path, q, true
 		}
 	}
 	return "", 0, false
+}
+
+// byCloseness lists every other tier in the order Lookup tries them: nearer
+// before farther, and at equal distance the higher one, since a better file that
+// is already on disk costs nothing to play.
+func byCloseness(quality ncm.Quality) []ncm.Quality {
+	all := ncm.Qualities()
+	order := make([]ncm.Quality, 0, len(all)-1)
+	for distance := 1; distance < len(all); distance++ {
+		higher := int(quality) + distance
+		if higher < len(all) {
+			order = append(order, ncm.Quality(higher))
+		}
+		lower := int(quality) - distance
+		if lower >= 0 {
+			order = append(order, ncm.Quality(lower))
+		}
+	}
+	return order
 }
 
 // find looks for one exact file name, in the primary directory first.
