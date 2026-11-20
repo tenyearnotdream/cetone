@@ -151,6 +151,11 @@ type track struct {
 	at        time.Duration
 	submitted atomic.Int64
 
+	// startedAt is when this session began playing. With submitted it says how
+	// much of the written sound the device has had time to play, which is what
+	// the end of a source waits for.
+	startedAt time.Time
+
 	seekCh   chan time.Duration
 	stop     chan struct{}
 	done     chan struct{}
@@ -267,6 +272,7 @@ func (t *track) run() {
 	defer t.close()
 
 	t.openSink()
+	t.startedAt = time.Now()
 
 	for {
 		// Everything that settles the session before any byte is read: apply a
@@ -417,7 +423,11 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 		if err != nil {
 			switch {
 			case errors.Is(err, io.EOF):
-				return pumpEnded, nil
+				// The device holds sound that has been written but not yet
+				// played. Reporting the end now would cut the last fraction of a
+				// second off the song, because the next session replaces the
+				// device and Close discards what it still holds.
+				return t.awaitPlayedOut()
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				// The session's context ended: the transfer was cancelled, which
 				// is a stop, not a song that reached its last frame.
@@ -450,6 +460,49 @@ func (t *track) seek(at time.Duration) {
 // than at the end of the track: a user who quits halfway keeps what was
 // downloaded.
 //
+// awaitPlayedOut waits until the device has had time to play what was written,
+// then reports the end of the source.
+//
+// A sink buffers: Write returns as soon as the sound is accepted, so at the end
+// of a source the last of it is still in the device. The wait is derived from
+// what was written and how long the session has been running, so it holds for a
+// stream, a file and a machine with no device at all — and it stays interruptible,
+// because a pause or a skip during those last milliseconds must not be delayed.
+func (t *track) awaitPlayedOut() (pumpOutcome, error) {
+	rate := time.Duration(t.format.SampleRate)
+	if rate <= 0 {
+		return pumpEnded, nil
+	}
+	frame := time.Second / rate
+	total := time.Duration(t.submitted.Load()) * frame
+	for {
+		remaining := total - time.Since(t.startedAt)
+		if remaining <= 0 {
+			return pumpEnded, nil
+		}
+		if remaining > 20*time.Millisecond {
+			remaining = 20 * time.Millisecond
+		}
+		select {
+		case at := <-t.seekCh:
+			t.mu.Lock()
+			t.at = at
+			t.engine.mu.Lock()
+			t.engine.pos = at
+			t.engine.anchorAt = time.Now()
+			t.engine.anchorFrame = t.submitted.Load()
+			t.engine.mu.Unlock()
+			t.mu.Unlock()
+			return pumpRestart, nil
+		case <-t.stop:
+			return pumpStopped, nil
+		case <-t.ctx.Done():
+			return pumpStopped, nil
+		case <-time.After(remaining):
+		}
+	}
+}
+
 // Only a transfer that delivered exactly what the server promised is promoted. A
 // partial file renamed into the cache would be played as the song from then on,
 // which is worse than caching nothing.

@@ -1,7 +1,9 @@
 package player
 
 import (
+	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/vivaui/viva/audio"
 )
@@ -14,11 +16,24 @@ import (
 // A machine with no device, or a backend that is not present for this build,
 // reports ErrNoDevice: the engine keeps running without sound and its own
 // position keeps moving, so the window, the lyrics and MPRIS still work.
+//
+// The sink is shared between the session goroutine (which writes) and the window
+// thread (which closes it when the user pauses or skips), so every call takes the
+// lock: closing twice is normal here, and a write after the close must return the
+// closed error rather than reach a released device.
 type deviceSink struct {
+	mu  sync.Mutex
 	out *audio.Output
 }
 
 func (s *deviceSink) Open(format Format) error {
+	// Open is called before the session starts, with no other user yet, but it
+	// takes the lock for the same reason Close does: the sink is one value.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.out != nil {
+		return errors.New("player: the sink is already open")
+	}
 	out, err := audio.Open(audio.Format{SampleRate: format.SampleRate, Channels: format.Channels})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrNoDevice, err)
@@ -28,17 +43,25 @@ func (s *deviceSink) Open(format Format) error {
 }
 
 func (s *deviceSink) Write(pcm []byte) (int, error) {
-	if s.out == nil {
+	s.mu.Lock()
+	out := s.out
+	s.mu.Unlock()
+	if out == nil {
 		return 0, ErrNoDevice
 	}
-	return s.out.Write(pcm)
+	// The device is written without holding the lock: a Write blocks while the
+	// device holds enough sound, and holding the lock there would stop a pause
+	// from closing the sink until the write returned.
+	return out.Write(pcm)
 }
 
 func (s *deviceSink) Close() error {
-	if s.out == nil {
-		return nil
-	}
+	s.mu.Lock()
 	out := s.out
 	s.out = nil
+	s.mu.Unlock()
+	if out == nil {
+		return nil
+	}
 	return out.Close()
 }

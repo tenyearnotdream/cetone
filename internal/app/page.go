@@ -74,6 +74,15 @@ func (a *App) page(c ui.C) {
 	a.sync()
 	a.now = c.Canvas().Now()
 
+	// Playing is a thing that changes while nothing else happens: the clock in
+	// the transport, the highlighted lyric line and the MPRIS position all move
+	// without an event. Asking for the next frame here is what lets them move;
+	// while stopped the window stays idle, and a desk with a music player on it
+	// should not repaint sixty times a second to say so.
+	if a.engine.Snapshot().Status == player.StatusPlaying {
+		c.Canvas().RequestFrameIn(playbackTick)
+	}
+
 	if a.quitRequested {
 		a.quitRequested = false
 		a.quit()
@@ -444,14 +453,27 @@ func (a *App) playerBar(c ui.C) {
 			}
 			// The bar is a slider: a drag, a click on the track and the arrow
 			// keys all work, and the state stays inside the song's length.
-			if !a.seekDrag.Dragging() {
+			//
+			// While the pointer holds the bar, the bar is the truth: the position
+			// it was released at is where the song restarts. The transport follows
+			// on release rather than on every pixel — each seek rebuilds the
+			// decoder, so seeking during a drag made the whole thing stutter and
+			// never catch up with the pointer.
+			dragging := a.seekDrag.Dragging()
+			if !dragging {
 				a.seekDrag.Value = float32(position/time.Second) * 100 / seconds
 			}
 			seek := ui.Slider(c, &a.seekDrag).Range(0, 100).Step(0.1).FillWidth()
 			seek.Label("播放进度")
 			seek.Disabled(!hasSong)
-			if seek.Changed() && duration > 0 {
+			if seek.Changed() && duration > 0 && !a.seekDrag.Dragging() {
 				a.seekTo(time.Duration(float64(seconds) * float64(a.seekDrag.Value) / 100 * float64(time.Second)))
+				position = a.engine.Snapshot().Position
+			}
+			// The clock reads the bar while it is being dragged, so the time under
+			// the pointer is the time it will play from.
+			if dragging && duration > 0 {
+				position = time.Duration(float64(seconds) * float64(a.seekDrag.Value) / 100 * float64(time.Second))
 			}
 			if busy {
 				ui.Progress(c, float32(snapshot.Buffered)).Indeterminate().FillWidth().Height(2)
@@ -557,6 +579,11 @@ func humanCount(n int64) string {
 	}
 	return fmt.Sprintf("%d", n)
 }
+
+// playbackTick is how often the window repaints while a song plays: often enough
+// for the transport and the lyric line to look continuous, rare enough that an
+// idle window is not redrawn for nothing.
+const playbackTick = 100 * time.Millisecond
 
 // WindowConfig is the window's own decoration: the icon of the current
 // appearance, and a title bar the page paints so the sea reaches the top edge.

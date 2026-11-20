@@ -39,6 +39,7 @@ func (a *App) playAt(index int) {
 	a.queueAt = index
 	song := a.queue[index]
 	a.persistQueue()
+	a.followPlayingSong(song)
 	go a.resolveAndPlay(song)
 }
 
@@ -50,6 +51,7 @@ func (a *App) playAtResuming(index int, at time.Duration) {
 	}
 	a.queueAt = index
 	song := a.queue[index]
+	a.followPlayingSong(song)
 	position := at
 	go func() {
 		a.resolveAndPlayAt(song, position)
@@ -71,30 +73,17 @@ func (a *App) resolveAndPlay(song ncm.Song) { a.resolveAndPlayAt(song, 0) }
 func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 	quality := a.songQuality(song)
 	volume, muted := a.config.Volume, a.config.Muted
+	cachePath, cachedQuality, hasCache := a.cache.Lookup(song.ID, quality)
 
-	cacheNote := ""
-	if path, cachedQuality, ok := a.cache.Lookup(song.ID, quality); ok {
-		a.engine.SetVolume(volume)
-		a.engine.SetMuted(muted)
-		err := a.engine.Play(context.Background(), player.Source{
-			Title:    song.Name,
-			File:     path,
-			Duration: song.Duration,
-		})
-		if err == nil {
-			if at > 0 {
-				a.engine.Seek(at)
-			}
-			a.work.push(func() {
-				a.playing = true
-				a.noteCachedQuality(song.ID, cachedQuality)
-				a.updateMPRIS()
-				a.updateTray()
-			})
-			a.invalidate()
+	// A cached file at the tier being asked for is the same audio as a download
+	// would fetch, so it plays without a request.
+	if hasCache && cachedQuality >= quality {
+		if a.playCached(song, cachePath, cachedQuality, at, volume, muted) {
 			return
 		}
-		cacheNote = "缓存文件无法解码，改为在线播放"
+		// The file is there but not decodable: ask the network, and say why.
+		hasCache = false
+		defer func() { a.notifyCachedBroken(song) }()
 	}
 
 	// The request has its own deadline; the playback session must not: it outlives
@@ -107,14 +96,22 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		resolve = a.client.SongURLs
 	}
 	urls, err := resolve(requestCtx, []int64{song.ID}, quality)
-	if err != nil || len(urls) == 0 || urls[0].URL == "" {
+	usable := err == nil && len(urls) > 0 && urls[0].URL != ""
+
+	// A lower tier than the one asked for is still worth playing when the network
+	// has nothing better. That is the case the cache exists for — a VIP that ran
+	// out, or no connection — and it is why a cached file is kept when the
+	// download cannot be made.
+	if hasCache && (!usable || urls[0].FreeTrial || urls[0].Quality <= cachedQuality) {
+		if a.playCached(song, cachePath, cachedQuality, at, volume, muted) {
+			return
+		}
+	}
+
+	if !usable {
 		reason := firstNonEmpty(errText(err), "该歌曲当前不可播放（可能版权或会员限制）")
 		a.work.push(func() {
-			detail := reason
-			if cacheNote != "" {
-				detail = cacheNote + "；" + reason
-			}
-			a.toast("无法播放", song.Name+"："+detail, ui.ToastError)
+			a.toast("无法播放", song.Name+"："+reason, ui.ToastError)
 			// Skip to the next song rather than stopping the queue on one
 			// unplayable track.
 			if len(a.queue) > 1 {
@@ -124,6 +121,7 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		a.invalidate()
 		return
 	}
+
 	resolved := urls[0]
 	a.engine.SetVolume(volume)
 	a.engine.SetMuted(muted)
@@ -153,15 +151,47 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 	}
 	a.work.push(func() {
 		a.playing = true
-		if cacheNote != "" {
-			a.toast("缓存文件已损坏", cacheNote, ui.ToastWarning)
-		} else if !cacheable {
+		if !cacheable {
 			a.toast("仅可试听", song.Name+"：当前账户只能播放试听片段，未写入缓存", ui.ToastWarning)
 		}
 		a.noteCachedQuality(song.ID, resolved.Quality)
 		a.updateMPRIS()
 		a.updateTray()
+	})
+	a.invalidate()
+}
+
+// playCached starts the song from the file on disk. It reports whether the file
+// played, so the caller can fall back to the network when it does not.
+func (a *App) playCached(song ncm.Song, path string, quality ncm.Quality, at time.Duration, volume float64, muted bool) bool {
+	a.engine.SetVolume(volume)
+	a.engine.SetMuted(muted)
+	err := a.engine.Play(context.Background(), player.Source{
+		Title:    song.Name,
+		File:     path,
+		Duration: song.Duration,
+	})
+	if err != nil {
+		return false
+	}
+	if at > 0 {
+		a.engine.Seek(at)
+	}
+	a.work.push(func() {
+		a.playing = true
+		a.noteCachedQuality(song.ID, quality)
+		a.updateMPRIS()
 		a.updateTray()
+	})
+	a.invalidate()
+	return true
+}
+
+// notifyCachedBroken says once that a cache file could not be decoded. It is a
+// warning rather than an error: the song still plays, from the network.
+func (a *App) notifyCachedBroken(song ncm.Song) {
+	a.work.push(func() {
+		a.toast("缓存文件已损坏", song.Name+"：改为在线播放", ui.ToastWarning)
 	})
 	a.invalidate()
 }
@@ -380,6 +410,20 @@ func (a *App) next() { a.advance(1, false) }
 
 // previous plays the previous song.
 func (a *App) previous() { a.advance(-1, false) }
+
+// followPlayingSong keeps the lyrics page on the song that is playing. The page
+// is a view of playback rather than of the row that opened it: skipping to the
+// next song has to change the words on screen, or it shows the lyrics of a song
+// that has already ended.
+func (a *App) followPlayingSong(song ncm.Song) {
+	top := a.top()
+	if top.kind != routeLyrics || top.id == song.ID {
+		return
+	}
+	a.nav[len(a.nav)-1] = route{kind: routeLyrics, id: song.ID, title: song.Name}
+	a.loadLyric(song.ID)
+	a.invalidate()
+}
 
 // seekTo moves the transport.
 func (a *App) seekTo(at time.Duration) {
