@@ -242,6 +242,42 @@ git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHu
 所以「充了会员但听起来没变」有且只有两种可能：设置里选的档位不够高，或者
 这首歌本身只有低档位音源。现在播放栏会直接告诉你实际在放哪一档。
 
+## 登录与接口
+
+**登录到哪一端不影响能拿到的权限。** 二维码登录只是拿到一个账号级的会话
+（`MUSIC_U`），权限由账号的会员等级决定，与扫码时显示"PC"还是"网页"无关。
+
+登录之后，不同请求会走两种"客户端身份"（见 `internal/ncm/crypto.go`）：
+
+| | weapi（网页 / PC） | eapi（手机） |
+| --- | --- | --- |
+| 报文 | 表单 `params`/`encSecKey` | hex 负载，发往 `interface.music.163.com` |
+| cookie 里的 os | `pc` | `iphone` |
+| 登录用它 | 是（所以手机端显示为 PC 登录） | — |
+| 音源用它 | — | 是 |
+
+决定音质上限的是**请求端**，不是登录端：`/api/song/enhance/player/url/v1`
+用 `level` 参数能表达 `hires` / `jyeffect` / `sky` / `jymaster`；同名功能的
+weapi 老接口只能传比特率（`br`），最高停在 Hi-Res 那个文件上。
+
+实测（同一会话，同一首 3 分钟的 VIP 歌）：
+
+| 请求 | 参数 | 服务端回答 | 大小 |
+| --- | --- | --- | --- |
+| weapi | `br=320000` | `exhigh` mp3 | 5.6 MB |
+| weapi | `br=999000` | `lossless` flac | 33.8 MB |
+| eapi | `level=hires` | `hires` flac | 33.8 MB |
+| eapi | `level=jyeffect` | `jyeffect` flac | **58.5 MB** |
+| eapi | `level=jymaster` | 降级为 `jyeffect` | 58.5 MB |
+
+注意 `br=999000` 和 `level=hires` 拿到的是**同一个文件**（33,778,600 字节），
+只是 level 字段的标注不同——这说明 weapi 的天花板就是 Hi-Res。环绕声及更高
+只有 eapi 的 `level` 能要到。
+
+同一会话在两种请求端下返回**同一个账号、同一个 VIP 等级**（实测
+`uid=131093126, vip=110`），所以两种身份可以混用，本客户端就是这么做的：
+登录用 weapi，音源用 eapi。
+
 ## Windows 打包与 Smart App Control
 
 ### 打包

@@ -36,7 +36,21 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
 	base62 = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 )
 
-// encryptMode is the wire format a request uses.
+// encryptMode is the wire format a request uses. The two are two different
+// clients to the same service, not two versions of one:
+//
+//   - weapi is the web/PC client: a form post, and an "os=pc" cookie. It is what
+//     the login uses, so the phone shows the sign-in as a PC one.
+//   - eapi is the phone client: a hex payload to interface.music.163.com and an
+//     "os=iphone" cookie. It is what the player-url endpoint is asked over.
+//
+// Which one a request uses is decided per endpoint, and the login is not part of
+// it: a session created by the web QR code answers the same account, the same VIP
+// level and the same tiers over both (measured). What the transport does decide is
+// which parameters the endpoint accepts, and that is why the player URL is asked
+// over eapi: /api/song/enhance/player/url/v1 names a level ("hires", "jyeffect",
+// "jymaster"), while the weapi form of the same call speaks only in bit rates and
+// stops at the Hi-Res file.
 type encryptMode int
 
 const (
