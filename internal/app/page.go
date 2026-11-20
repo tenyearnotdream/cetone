@@ -49,7 +49,7 @@ func Run(base app.Config, paths store.Paths) error {
 			return err
 		}
 		a.window = window
-		a.inv = config.Invalidator
+		a.inv.Store(config.Invalidator)
 		// The status item is added after the window exists, so the first press
 		// on it has somewhere to show.
 		a.startTray()
@@ -466,8 +466,15 @@ func (a *App) playerBar(c ui.C) {
 			seek := ui.Slider(c, &a.seekDrag).Range(0, 100).Step(0.1).FillWidth()
 			seek.Label("播放进度")
 			seek.Disabled(!hasSong)
-			if seek.Changed() && duration > 0 && !a.seekDrag.Dragging() {
-				a.seekTo(time.Duration(float64(seconds) * float64(a.seekDrag.Value) / 100 * float64(time.Second)))
+			if seek.Changed() && duration > 0 {
+				// Recorded now, applied below: a click and a drag both arrive as a
+				// change here, and only the drag must wait for its release.
+				a.seekTarget = time.Duration(float64(seconds) * float64(a.seekDrag.Value) / 100 * float64(time.Second))
+				a.seekPending = true
+			}
+			if a.seekPending && duration > 0 && !a.seekDrag.Dragging() {
+				a.seekPending = false
+				a.seekTo(a.seekTarget)
 				position = a.engine.Snapshot().Position
 			}
 			// The clock reads the bar while it is being dragged, so the time under

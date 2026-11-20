@@ -58,8 +58,16 @@ jobs:
       # -race catches the concurrent access a plain run misses: this project
       # shares one cookie jar between the requests a page starts together, and
       # the player hands frames to the device from its own goroutine.
+      #
+      # The runner has no sound card, which is a configuration worth testing on
+      # purpose: a fix that only worked on a machine with a device once passed
+      # here and failed in a container. ALSA's default device is pointed at a
+      # name that does not exist so the failure is the same everywhere.
       - name: go test (with the race detector)
         run: go test ./... -count=1 -race
+        env:
+          ALSA_CARD: "99"
+          ALSA_PCM_CARD: "99"
 
   cross-build:
     name: cross-build ${{ matrix.target }}/${{ matrix.arch }}

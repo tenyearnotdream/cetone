@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vivaui/viva/app"
@@ -48,7 +49,7 @@ type App struct {
 
 	// inv wakes the window when a worker publishes. It is set by Run and by the
 	// page's Config.
-	inv *app.Invalidator
+	inv atomic.Pointer[app.Invalidator]
 
 	// work is the queue of closures a worker published for the window thread.
 	work *workQueue
@@ -117,6 +118,13 @@ type App struct {
 
 	// ocean is the background texture, drawn once per appearance.
 	ocean oceanTexture
+
+	// seekTarget is where the user asked to be, and seekPending says the request
+	// has not reached the transport yet. A drag reports a change on every pixel;
+	// the request is applied once the pointer lets go, so the decoder is rebuilt
+	// once instead of continuously.
+	seekTarget  time.Duration
+	seekPending bool
 
 	// theme is what the window paints with. It is a field, not a value built per
 	// call, because the page keeps a pointer to it: reassigning it is how a theme
@@ -232,6 +240,11 @@ func New(paths store.Paths) (*App, error) {
 	a.engine = player.NewEngine()
 	a.engine.SetVolume(config.Volume)
 	a.engine.SetMuted(config.Muted)
+	// The engine reports from its own goroutine, which can start before the window
+	// exists (a test, or a restored queue): the field is given an invalidator now
+	// so the first read is not a race with Page's write. Page replaces it with the
+	// window's own, which is the same type.
+	a.inv.Store(&app.Invalidator{})
 	a.engine.OnChange = a.invalidate
 	a.engine.OnFinish = func() {
 		a.work.push(func() { a.finishedTrack() })
@@ -262,19 +275,19 @@ func (a *App) Page(base app.Config) (*ui.Page, app.Config) {
 	page := ui.NewPage(ui.PageConfig{View: a.page, Theme: theme, FollowSystemTheme: follow})
 	config := page.Config(base)
 	config.OnWake = a.sync
-	a.inv = config.Invalidator
+	a.inv.Store(config.Invalidator)
 	return page, config
 }
 
 // pageConfig is the config the page was built with; a test uses Page.
 func (a *App) invalidate() {
-	if a.inv != nil {
-		a.inv.Invalidate()
+	if inv := a.inv.Load(); inv != nil {
+		inv.Invalidate()
 	}
 }
 
 // SetInvalidator is how Run hands the window's waker to the application.
-func (a *App) SetInvalidator(inv *app.Invalidator) { a.inv = inv }
+func (a *App) SetInvalidator(inv *app.Invalidator) { a.inv.Store(inv) }
 
 // themeConfig is the page's theme configuration: an explicit theme the user
 // chose, or none at all with the system appearance followed, which is what
