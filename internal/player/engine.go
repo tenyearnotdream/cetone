@@ -126,6 +126,11 @@ type Engine struct {
 	// is what keeps the bar from running ahead of the sound.
 	seekTo  time.Duration
 	seeking bool
+	// seekSeq numbers the seeks asked for. A session that finishes landing an old
+	// one checks it still owns the newest before it says the position is there: a
+	// drag asks many times while the decoder is moving, and the slow one must not
+	// win over the latest.
+	seekSeq uint64
 }
 
 // NewEngine returns an engine at 70% volume with nothing playing.
@@ -160,6 +165,12 @@ type track struct {
 	// seeking says a restart is pending: the run loop repositions the decoder,
 	// discards what the device holds, and only then declares the new position.
 	seeking bool
+
+	// decoded is how many samples the current decoder has produced since it was
+	// positioned. A forward discard counts from here, not from zero: reading
+	// "the whole song" past a decoder that is already a minute in lands the wrong
+	// place, which is heard as the wrong part of the song playing.
+	decoded atomic.Int64
 
 	// startedAt is when this session began playing. With submitted it says how
 	// much of the written sound the device has had time to play, which is what
@@ -302,15 +313,47 @@ func (t *track) run() {
 		// keeps the reported position and the sound together; doing it once is
 		// what keeps a drag (which asks many times) from repaying it twice.
 		if t.takeSeeking() {
-			if err := discardTo(dec, at, t.format); err != nil {
+			want := samplesAt(at, t.format)
+			next, have, err := seekSamples(dec, want, t.decoded.Load(), t.format)
+			if errors.Is(err, errNoBackwardSeek) {
+				// The format cannot go backwards from here (a stream that has not
+				// finished arriving cannot). Start the decoder again from the first
+				// byte and read up to the target: slow for a long song, but the
+				// position it reports is then the truth.
+				if _, seekErr := t.reader.Seek(0, io.SeekStart); seekErr != nil {
+					t.engine.fail(t, seekErr)
+					return
+				}
+				reopened, openErr := openDecoder(t.reader)
+				if openErr != nil {
+					t.engine.fail(t, openErr)
+					return
+				}
+				next = reopened
+				t.mu.Lock()
+				t.dec = reopened
+				t.mu.Unlock()
+				next, have, err = seekSamples(reopened, want, 0, t.format)
+			}
+			if err != nil {
 				t.engine.fail(t, err)
 				return
 			}
+			dec = next
+			t.decoded.Store(have)
+			// The device still holds the old place; closing it is the only way to
+			// throw that away.
 			sink = t.flush(sink)
 			t.land(at)
 			t.mu.Lock()
 			t.at = 0
+			// A newer seek arrived while this one was moving the decoder: apply it
+			// now, before a single frame of the stale target is played.
+			again := t.seeking
 			t.mu.Unlock()
+			if again {
+				continue
+			}
 		}
 
 		t.engine.mu.Lock()
@@ -391,6 +434,7 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 		n, err := dec.Read(buf)
 		if n > 0 {
 			n -= n % frameSize
+			t.decoded.Add(int64(n / frameSize))
 			pcm := buf[:n]
 			t.engine.scaleVolume(pcm)
 			if n > 0 && sink != nil {
@@ -743,6 +787,7 @@ func (e *Engine) Seek(at time.Duration) error {
 	// there, not now. Reporting it now is what made the bar run ahead of the
 	// sound: the device still holds up to a fifth of a second of the old place,
 	// and the decoder has not moved yet.
+	e.seekSeq++
 	e.seekTo = at
 	e.seeking = true
 	e.mu.Unlock()
@@ -756,6 +801,14 @@ func (e *Engine) Seek(at time.Duration) error {
 // what it held.
 func (e *Engine) landSeek(at time.Duration) {
 	e.mu.Lock()
+	// A newer seek has been asked for since this one started moving the decoder.
+	// Recording this position would put the bar and the sound at the older place,
+	// which is what a drag across the bar used to do.
+	if e.seeking && e.seekTo != at {
+		e.mu.Unlock()
+		e.notify()
+		return
+	}
 	e.pos = at
 	e.anchorAt = time.Now()
 	e.anchorFrame = 0
@@ -991,11 +1044,23 @@ func (t *track) flush(sink Sink) Sink {
 		t.engine.mu.Lock()
 		t.engine.device = false
 		t.engine.mu.Unlock()
+		// The session owns no device now, and close must not try to close the one
+		// it just gave up.
+		t.mu.Lock()
+		t.sink = nil
+		t.mu.Unlock()
 		return nil
 	}
 	t.engine.mu.Lock()
 	t.engine.device = true
 	t.engine.mu.Unlock()
+	// The session's sink is the one that is open now. Leaving the old value there
+	// was a leak with a sound: close shut the device it had already given up, and
+	// the one this opened kept playing what was written to it, so the previous
+	// place — or the previous song — went on being heard.
+	t.mu.Lock()
+	t.sink = next
+	t.mu.Unlock()
 	return next
 }
 
@@ -1004,6 +1069,7 @@ func (t *track) flush(sink Sink) Sink {
 // target plus what has been played since.
 func (t *track) land(at time.Duration) {
 	t.submitted.Store(0)
+	t.decoded.Store(samplesAt(at, t.format))
 	t.startedAt = time.Now()
 	t.engine.landSeek(at)
 }

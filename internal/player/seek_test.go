@@ -50,10 +50,13 @@ func (s *pacedSink) Write(pcm []byte) (int, error) {
 	frames := int64(len(pcm) / s.format.FrameSize())
 	s.played += frames
 	due := s.start.Add(framesToDuration(s.played, s.format.SampleRate))
+	// The channel is read under the same lock Close takes: a sink is closed from
+	// the window thread while the session writes on its own.
+	stop := s.stop
 	s.mu.Unlock()
 	if wait := time.Until(due); wait > 0 {
 		select {
-		case <-s.stop:
+		case <-stop:
 		case <-time.After(wait):
 		}
 	}

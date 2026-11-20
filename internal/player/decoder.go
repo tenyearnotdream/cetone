@@ -45,26 +45,52 @@ type seeker interface {
 	SeekSample(sample int64) error
 }
 
-// discardTo moves dec to the given position: by seeking when the format can, and
-// by reading forward when it cannot.
-func discardTo(dec decoder, at time.Duration, format Format) error {
-	if at <= 0 || format.SampleRate == 0 {
-		return nil
+// seekSamples moves a decoder to a sample position, using its own seek when the
+// format has one and reading forward from where it is when it does not.
+//
+// Reading forward from the decoder's own position is what keeps the position
+// honest: a stream cannot seek past the bytes it has received, so the only way to
+// reach a later point is to decode up to it — which waits for the download, and is
+// why a seek on a song still arriving takes as long as the network needs.
+//
+// have is how many samples this decoder has already produced. It is the caller's
+// bookkeeping, because the decoder interface does not promise to report it.
+func seekSamples(dec decoder, want, have int64, format Format) (decoder, int64, error) {
+	if format.SampleRate <= 0 {
+		return dec, have, nil
 	}
-	sample := int64(at.Seconds() * float64(format.SampleRate))
+	if want < 0 {
+		want = 0
+	}
+	// A format with a real seek is used first, in either direction: it lands on the
+	// target frame instead of decoding everything up to it, which on a 58 MB FLAC
+	// is the difference between 13 ms and 1.3 s.
 	if s, ok := dec.(seeker); ok {
-		if err := s.SeekSample(sample); err == nil {
-			return nil
+		if err := s.SeekSample(want); err == nil {
+			return dec, want, nil
 		}
-		// A stream that cannot be sought (a download still arriving) reports an
-		// error here; reading forward is the honest fallback.
 	}
-	return discardForward(dec, at, format)
+	if want < have {
+		// It refused and the target is behind where the decoder is: only starting
+		// again can get there, and a stream usually cannot.
+		return dec, have, errNoBackwardSeek
+	}
+	if err := discardForwardSamples(dec, want-have, format); err != nil {
+		return dec, have, err
+	}
+	return dec, want, nil
 }
 
-// discardForward reads and throws away the bytes up to a position.
-func discardForward(dec decoder, at time.Duration, format Format) error {
-	remaining := int64(at.Seconds() * float64(format.SampleRate*format.FrameSize()))
+// errNoBackwardSeek reports that the decoder cannot move backwards; the caller
+// opens it again from the start.
+var errNoBackwardSeek = errors.New("player: this source cannot seek backwards")
+
+// discardForwardSamples reads and throws away a number of samples.
+func discardForwardSamples(dec decoder, samples int64, format Format) error {
+	if samples <= 0 {
+		return nil
+	}
+	remaining := samples * int64(format.FrameSize())
 	buf := make([]byte, 32<<10)
 	for remaining > 0 {
 		n, err := dec.Read(buf)
@@ -457,3 +483,11 @@ func clampInt32(v int32) int32 {
 }
 
 var _ = os.ErrClosed
+
+// samplesAt is a position as a sample count.
+func samplesAt(at time.Duration, format Format) int64 {
+	if format.SampleRate <= 0 || at <= 0 {
+		return 0
+	}
+	return int64(at.Seconds() * float64(format.SampleRate))
+}
