@@ -213,6 +213,35 @@ git push origin v1.0.0      # 触发 Release workflow，产物自动挂到 GitHu
 也可以手动触发（Actions → Release → Run workflow），填版本号即可；workflow 会自己
 打 tag。
 
+## 音质
+
+设置里的「音质」就是**实际请求的档位**，不是下限：
+
+| 设置 | 请求的 level | 容器 | 实测大小（3 分钟） |
+| --- | --- | --- | --- |
+| 标准 | `standard` | mp3 | ~2.2 MB |
+| 较高 | `higher` | mp3 | ~3.4 MB |
+| 极高 | `exhigh` | mp3 | ~5.7 MB |
+| 无损 | `lossless` | flac | ~20 MB |
+| Hi-Res | `hires` | flac | ~34 MB |
+| 环绕声 | `jyeffect` | flac | ~58 MB |
+| 沉浸声 / 母带 | `sky` / `jymaster` | flac | 视账号而定 |
+
+用的是 `/api/song/enhance/player/url/v1` 的 `level` + `encodeType` 参数（eapi），
+**不是**老的 `/song/url` + `br`。后者最高只能表达 Hi-Res，新版端点才能表达
+环绕声、沉浸声与母带。
+
+关于会员：会员只决定**服务端愿意给到哪一档**，与客户端无关。实测一个
+`VIPType=110` 的账号，请求 `jymaster` / `sky` 时服务端会静默降级成 `jyeffect`
+——这不是错误，服务端就是这么回答的。所以客户端做三件事：
+
+1. 按你选的档位请求（选「母带」就请求 `jymaster`）
+2. 记录**服务端实际回答的 level**（`SongURL` 里的 `Level`），而不是假定拿到了
+3. 在播放栏曲名旁显示这个实际档位，选高了但服务端降级时你能看见
+
+所以「充了会员但听起来没变」有且只有两种可能：设置里选的档位不够高，或者
+这首歌本身只有低档位音源。现在播放栏会直接告诉你实际在放哪一档。
+
 ## Windows 打包与 Smart App Control
 
 ### 打包

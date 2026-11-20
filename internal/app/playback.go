@@ -225,18 +225,24 @@ func cacheableStream(song ncm.Song, resolved ncm.SongURL) bool {
 }
 
 // songQuality is the tier to ask for: the one picked for this song, else the
-// highest the account may stream at, else the setting.
+// setting.
+//
+// The setting is what the user asked for, not a floor under it. It is the only
+// thing that decides how much bandwidth a song costs — 320 kb/s is 5.7 MB and
+// Hi-Res is 34 MB for the same three minutes — so raising it on the user's
+// behalf would spend their disk on a choice they did not make. Asking for more
+// than the account may play is harmless: the server answers the best level it
+// will give and the answer says which, so a wrong setting costs a request and
+// never a failure.
+//
+// The account's own ceiling (Privilege.Level) is deliberately not used to cap
+// this: it reports "hires" for an account that the server happily serves
+// "jyeffect" for, so capping by it would hide a tier the account can play.
 func (a *App) songQuality(song ncm.Song) ncm.Quality {
-	quality := song.Selected
-	if quality == 0 && song.Privilege.Level != "" {
-		if q, ok := ncm.QualityFromLevel(song.Privilege.Level); ok {
-			quality = q
-		}
+	if song.Selected != 0 {
+		return song.Selected
 	}
-	if preferred := a.config.PreferredQuality(); preferred > quality {
-		quality = preferred
-	}
-	return quality
+	return a.config.PreferredQuality()
 }
 
 // noteCachedQuality records the tier a song played at, so the list can show
@@ -634,6 +640,18 @@ func firstNonEmpty(values ...string) string {
 		if v != "" {
 			return v
 		}
+	}
+	return ""
+}
+
+// playingQuality names the tier a song is playing at, for the transport: the
+// level the server answered with, which is what the listener is hearing.
+func (a *App) playingQuality(song ncm.Song) string {
+	if a.queueAt < 0 || a.queueAt >= len(a.queue) || a.queue[a.queueAt].ID != song.ID {
+		return ""
+	}
+	if actual := a.queue[a.queueAt].Actual; actual != 0 {
+		return actual.String()
 	}
 	return ""
 }

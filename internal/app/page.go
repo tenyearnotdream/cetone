@@ -380,7 +380,17 @@ func (a *App) playerBar(c ui.C) {
 		ui.Column(c).Width(190).Gap(2).Children(func() {
 			if hasSong {
 				a.textButton(c, song.Name, func() { a.push(route{kind: routeLyrics, id: song.ID, title: song.Name}) }).FontSize(13).Bold().Ellipsis()
-				ui.Text(c, song.Singer()).FontSize(11).Muted().Ellipsis()
+				ui.Row(c).Gap(6).Items(ui.Center).Children(func() {
+					ui.Text(c, song.Singer()).FontSize(11).Muted().Ellipsis()
+					// What is actually playing: the tier the server answered with,
+					// not the one that was asked for. A setting above the account's
+					// plan is answered with a lower level, and the interface has to
+					// say so rather than let the user believe otherwise.
+					if playing := a.playingQuality(song); playing != "" {
+						ui.Text(c, playing).FontSize(9).Mono().Pad(2).PadX(5).
+							Radius(3).Background(theme.Accent).Color(theme.AccentForeground)
+					}
+				})
 			} else {
 				ui.Text(c, "未在播放").FontSize(13).Bold().Muted()
 				ui.Text(c, "从发现页挑一首").FontSize(11).Muted()
