@@ -116,6 +116,15 @@ type App struct {
 	// stopAppearance ends the desktop appearance watch, when one is running.
 	stopAppearance func()
 
+	// library is the table beside the audio files: which song is cached at which
+	// tier, and the best tier the server has offered for it.
+	library *store.Library
+
+	// upgrading holds the songs whose better file is being fetched right now, so
+	// a play that repeats does not start a second transfer.
+	upgradeMu sync.Mutex
+	upgrading map[int64]bool
+
 	// ocean is the background texture, drawn once per appearance.
 	ocean oceanTexture
 
@@ -125,6 +134,9 @@ type App struct {
 	// once instead of continuously.
 	seekTarget  time.Duration
 	seekPending bool
+
+	// qualityMenuOpen is whether the tier menu under the transport is open.
+	qualityMenuOpen bool
 
 	// theme is what the window paints with. It is a field, not a value built per
 	// call, because the page keeps a pointer to it: reassigning it is how a theme
@@ -220,6 +232,8 @@ func New(paths store.Paths) (*App, error) {
 	}
 	a.config = config
 	a.cache = store.NewCache(paths, config.CacheDirs)
+	a.library = store.NewLibrary(paths)
+	_ = a.library.Load()
 
 	client := ncm.NewClient()
 	if err := client.SetProxy(config.Proxy); err != nil {
@@ -250,7 +264,14 @@ func New(paths store.Paths) (*App, error) {
 		a.work.push(func() { a.finishedTrack() })
 		a.invalidate()
 	}
-	a.engine.OnCacheWritten = func() { a.cached.setDirty() }
+	// A finished download is when a song actually has a file: the library records
+	// it then, from the name the cache gave it, which is the contract with the GTK
+	// client and names both the song and the tier.
+	a.engine.OnCacheWritten = func(path string) {
+		a.cached.setDirty()
+		a.fileWasCached(path)
+	}
+	a.upgrading = make(map[int64]bool)
 	a.volumeDrag = ui.SliderState{Value: float32(config.Volume * 100)}
 
 	a.noRemote = os.Getenv("NCMVIVA_NOREMOTE") == "1"

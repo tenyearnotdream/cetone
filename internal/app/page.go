@@ -382,14 +382,11 @@ func (a *App) playerBar(c ui.C) {
 				a.textButton(c, song.Name, func() { a.push(route{kind: routeLyrics, id: song.ID, title: song.Name}) }).FontSize(13).Bold().Ellipsis()
 				ui.Row(c).Gap(6).Items(ui.Center).Children(func() {
 					ui.Text(c, song.Singer()).FontSize(11).Muted().Ellipsis()
-					// What is actually playing: the tier the server answered with,
-					// not the one that was asked for. A setting above the account's
-					// plan is answered with a lower level, and the interface has to
-					// say so rather than let the user believe otherwise.
-					if playing := a.playingQuality(song); playing != "" {
-						ui.Text(c, playing).FontSize(9).Mono().Pad(2).PadX(5).
-							Radius(3).Background(theme.Accent).Color(theme.AccentForeground)
-					}
+					// What is actually playing, and the way to ask for something
+					// else for this song: the badge is the menu's anchor. The tier
+					// is what the server answered with, not what was asked for, so a
+					// plan that holds less than the request says so plainly.
+					a.qualityBadge(c, song)
 				})
 			} else {
 				ui.Text(c, "未在播放").FontSize(13).Bold().Muted()
@@ -623,4 +620,79 @@ func (a *App) WindowConfig(base app.Config) app.Config {
 	// config asks it at every paint: they follow a theme change.
 	base.WindowControls = a.windowControlsStyle
 	return base
+}
+
+// qualityBadge is the tier in the transport: a small chip that names what is
+// playing and opens the list of tiers this song can be played at.
+//
+// The list is the tiers up to what the server gave for this song, which is the
+// ones it can actually serve. Picking one plays the song again at that tier from
+// the position it had reached, so the choice takes effect at once instead of on
+// the next play.
+func (a *App) qualityBadge(c ui.C, song ncm.Song) {
+	theme := c.Theme()
+	playing := a.playingQuality(song)
+	if playing == "" {
+		return
+	}
+	badge := ui.Row(c).Pad(2).PadX(5).Radius(3).Background(theme.Accent).Hit(ui.ID(c), "音质："+playing)
+	badge.Label("音质")
+	badge.Hover(ui.Look{}.Background(theme.Selection))
+	badge.Children(func() {
+		ui.Text(c, playing).FontSize(9).Mono().Color(theme.AccentForeground)
+	})
+	ui.Menu(c, badge, &a.qualityMenuOpen, func(menu *ui.MenuItems) {
+		best := a.bestQualityFor(song)
+		menu.Label("这首歌可播的音质")
+		for q := ncm.QualityStandard; q <= best; q++ {
+			quality := q
+			item := menu.Item(q.String())
+			if quality == song.Selected {
+				item.Chosen(true)
+			}
+			if item.Clicked() {
+				a.chooseQuality(song, quality)
+			}
+		}
+		if best < ncm.QualityMaster {
+			menu.Separator()
+			menu.Label("更高的档位这个账号拿不到")
+		}
+	})
+}
+
+// bestQualityFor is the highest tier this song can be played at: the one the
+// server answered with, since asking for more is answered with that same level.
+func (a *App) bestQualityFor(song ncm.Song) ncm.Quality {
+	if song.Actual != 0 {
+		return song.Actual
+	}
+	return ncm.QualityMaster
+}
+
+// chooseQuality plays the current song at another tier, from where it is.
+func (a *App) chooseQuality(song ncm.Song, quality ncm.Quality) {
+	for i := range a.queue {
+		if a.queue[i].ID != song.ID {
+			continue
+		}
+		a.queue[i].Selected, a.queue[i].SelectedSet = quality, true
+	}
+	song.Selected, song.SelectedSet = quality, true
+	// From the position it has reached: switching the tier is not a reason to
+	// start the song again.
+	at := a.engine.Snapshot().Position
+	if index := a.queueAtOf(song.ID); index >= 0 {
+		a.playAtResuming(index, at)
+	}
+}
+
+// queueAtOf is the queue index of a song, or -1.
+func (a *App) queueAtOf(id int64) int {
+	for i := range a.queue {
+		if a.queue[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }

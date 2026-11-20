@@ -10,24 +10,25 @@ import (
 	"cetone/internal/ncm"
 )
 
-func TestTheQualitySettingDecidesWhatIsAskedFor(t *testing.T) {
+func TestTheBestTierIsAskedForByDefault(t *testing.T) {
 	a := testApp(t)
-	// A song whose own level is the highest one: the setting must still win.
+	// No per-song choice: the client asks for the highest tier it can name and
+	// lets the server answer with what the account holds. There is no account-wide
+	// setting, because the best tier depends on the song.
 	song := ncm.Song{ID: 6001, Name: "song"}
-	song.Privilege.Level = "jymaster"
-
-	for _, setting := range []ncm.Quality{ncm.QualityStandard, ncm.QualityExtreme, ncm.QualityLossless} {
-		a.config.Quality = int(setting)
-		if got := a.songQuality(song); got != setting {
-			t.Errorf("with the setting at %v the song asks for %v", setting, got)
-		}
+	if got := a.songQuality(song); got != ncm.QualityMaster {
+		t.Fatalf("with no choice the song asks for %v", got)
 	}
 
-	// An explicit choice for this play wins over the setting.
-	song.Selected = ncm.QualityHigher
-	a.config.Quality = int(ncm.QualityMaster)
+	// An explicit choice for this play wins over that.
+	song.Selected, song.SelectedSet = ncm.QualityHigher, true
 	if got := a.songQuality(song); got != ncm.QualityHigher {
-		t.Fatalf("a per-song choice was overridden by the setting: %v", got)
+		t.Fatalf("a per-song choice was ignored: %v", got)
+	}
+	// Including lower than the default, which is the point of offering it.
+	song.Selected = ncm.QualityStandard
+	if got := a.songQuality(song); got != ncm.QualityStandard {
+		t.Fatalf("a lower per-song choice was ignored: %v", got)
 	}
 }
 

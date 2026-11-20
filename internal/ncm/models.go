@@ -216,8 +216,11 @@ type Song struct {
 	// Available is the set of tiers the account may stream, when the API
 	// reports it.
 	Available []Quality
-	// Selected is the tier the user picked for this play, if any.
-	Selected Quality
+	// Selected is the tier the user picked for this play, and SelectedSet says the
+	// pick is authoritative. The flag exists because QualityStandard is zero: a
+	// bare Selected cannot tell "the user chose 标准" from "the user chose nothing".
+	Selected    Quality
+	SelectedSet bool
 	// Actual is the tier the server answered with.
 	Actual Quality
 	// URL is the stream URL of the last resolve, empty when unresolved.

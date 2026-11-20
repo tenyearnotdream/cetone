@@ -259,3 +259,41 @@ func (t *tailFile) Seek(offset int64, whence int) (int64, error) {
 
 // Close closes the read handle; the download keeps running.
 func (t *tailFile) Close() error { return t.file.Close() }
+
+// FetchToCache downloads a source straight to its cache file and leaves it there,
+// without playing it. It is how a song already heard at one tier gets its better
+// file: the listener keeps listening, and the copy that will still play after the
+// subscription ends is fetched beside it.
+//
+// It reports an error rather than a partial file: a transfer that did not deliver
+// every byte is deleted, because a fragment at the cache name would be played as
+// the song from then on.
+func FetchToCache(ctx context.Context, client *http.Client, source Source) error {
+	if source.Stream == "" || source.CachePath == "" {
+		return errors.New("player: fetch: a stream and a cache path are needed")
+	}
+	part := source.CachePath + ".part"
+	d, err := startDownload(ctx, client, source.Stream, part, source.Header)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if !d.waitDone(30 * time.Minute) {
+		if err := d.errLocked(); err != nil {
+			return err
+		}
+		return errors.New("player: fetch: the transfer did not finish")
+	}
+	if !d.complete() {
+		return errors.New("player: fetch: the transfer was incomplete")
+	}
+	if err := os.MkdirAll(filepath.Dir(source.CachePath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(part, source.CachePath); err != nil {
+		return err
+	}
+	// The bytes live at their final name: Close must not delete them.
+	d.keep.Store(true)
+	return nil
+}

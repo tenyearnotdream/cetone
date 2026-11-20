@@ -98,10 +98,11 @@ type Engine struct {
 	OnChange func()
 	// OnFinish reports a session that reached its end.
 	OnFinish func()
-	// OnCacheWritten reports that a finished stream was moved into the cache.
-	// It runs on the session's goroutine, so a receiver must be safe from
-	// another thread.
-	OnCacheWritten func()
+	// OnCacheWritten reports that a finished stream was moved into the cache, and
+	// where: the path is what tells the caller which song now has a file, without
+	// the engine having to understand songs or tiers. It runs on the session's
+	// goroutine, so a receiver must be safe from another thread.
+	OnCacheWritten func(path string)
 
 	mu       sync.Mutex
 	track    *track
@@ -120,6 +121,11 @@ type Engine struct {
 	// that had been handed to the device then.
 	anchorAt    time.Time
 	anchorFrame int64
+	// seekTo is the position a seek in flight is heading for, and seeking says one
+	// is in flight. The reported position is seekTo until the session lands, which
+	// is what keeps the bar from running ahead of the sound.
+	seekTo  time.Duration
+	seeking bool
 }
 
 // NewEngine returns an engine at 70% volume with nothing playing.
@@ -151,6 +157,10 @@ type track struct {
 	at        time.Duration
 	submitted atomic.Int64
 
+	// seeking says a restart is pending: the run loop repositions the decoder,
+	// discards what the device holds, and only then declares the new position.
+	seeking bool
+
 	// startedAt is when this session began playing. With submitted it says how
 	// much of the written sound the device has had time to play, which is what
 	// the end of a source waits for.
@@ -176,9 +186,12 @@ func newTrack(ctx context.Context, e *Engine, source Source, at time.Duration) (
 		source: source,
 		ctx:    ctx,
 		at:     at,
-		seekCh: make(chan time.Duration, 1),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		// Starting part-way in is the session's first seek: the run loop applies
+		// it the same way it applies any other, which keeps one path for both.
+		seeking: at > 0,
+		seekCh:  make(chan time.Duration, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	if source.File != "" && source.Stream == "" {
 		file, err := os.Open(source.File)
@@ -283,11 +296,21 @@ func (t *track) run() {
 		sink := t.sink
 		t.mu.Unlock()
 
-		if at > 0 {
+		// A seek, in one place: move the decoder to the target, make the device
+		// forget what it still held from the old place, and only then say the
+		// position is the target. Doing it here and not in the caller is what
+		// keeps the reported position and the sound together; doing it once is
+		// what keeps a drag (which asks many times) from repaying it twice.
+		if t.takeSeeking() {
 			if err := discardTo(dec, at, t.format); err != nil {
 				t.engine.fail(t, err)
 				return
 			}
+			sink = t.flush(sink)
+			t.land(at)
+			t.mu.Lock()
+			t.at = 0
+			t.mu.Unlock()
 		}
 
 		t.engine.mu.Lock()
@@ -315,22 +338,6 @@ func (t *track) run() {
 			return
 		}
 
-		// A seek: move the decoder itself to the target. Rebuilding it from byte
-		// zero and reading forward is what made a seek to the end of a FLAC song
-		// go silent for over a second; the formats that can seek land on the
-		// frame directly. The sink stays open: one source has one format, so no
-		// rate change can happen here.
-		t.mu.Lock()
-		pending := t.at
-		dec = t.dec
-		t.mu.Unlock()
-		if err := discardTo(dec, pending, t.format); err != nil {
-			t.engine.fail(t, err)
-			return
-		}
-		t.mu.Lock()
-		t.at = 0
-		t.mu.Unlock()
 	}
 }
 
@@ -366,15 +373,13 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 	for {
 		select {
 		case at := <-t.seekCh:
+			// Only note where to go: the position is not moved here either, because
+			// the decoder has not been repositioned and the device still holds the
+			// old place. The run loop does both and then lands the seek.
 			t.mu.Lock()
 			t.at = at
+			t.seeking = true
 			t.mu.Unlock()
-			t.resetSubmitted()
-			t.engine.mu.Lock()
-			t.engine.pos = at
-			t.engine.anchorAt = time.Now()
-			t.engine.anchorFrame = 0
-			t.engine.mu.Unlock()
 			return pumpRestart, nil
 		case <-t.stop:
 			return pumpStopped, nil
@@ -487,15 +492,13 @@ func (t *track) awaitPlayedOut() (pumpOutcome, error) {
 		}
 		select {
 		case at := <-t.seekCh:
+			// Only note where to go: the position is not moved here either, because
+			// the decoder has not been repositioned and the device still holds the
+			// old place. The run loop does both and then lands the seek.
 			t.mu.Lock()
 			t.at = at
+			t.seeking = true
 			t.mu.Unlock()
-			t.resetSubmitted()
-			t.engine.mu.Lock()
-			t.engine.pos = at
-			t.engine.anchorAt = time.Now()
-			t.engine.anchorFrame = 0
-			t.engine.mu.Unlock()
 			return pumpRestart, nil
 		case <-t.stop:
 			return pumpStopped, nil
@@ -535,7 +538,7 @@ func (t *track) promoteCache() {
 	// think the transfer was abandoned and delete it.
 	t.dl.keep.Store(true)
 	if t.engine.OnCacheWritten != nil {
-		t.engine.OnCacheWritten()
+		t.engine.OnCacheWritten(t.source.CachePath)
 	}
 }
 
@@ -729,19 +732,36 @@ func (e *Engine) Seek(at time.Duration) error {
 		at = e.duration
 	}
 	t := e.track
+	if t == nil {
+		// Nothing is playing: the position is simply the new one.
+		e.pos = at
+		e.mu.Unlock()
+		e.notify()
+		return nil
+	}
+	// The position becomes the target when the session has actually restarted
+	// there, not now. Reporting it now is what made the bar run ahead of the
+	// sound: the device still holds up to a fifth of a second of the old place,
+	// and the decoder has not moved yet.
+	e.seekTo = at
+	e.seeking = true
+	e.mu.Unlock()
+	t.seek(at)
+	e.notify()
+	return nil
+}
+
+// landSeek records that the session is at the target, called from the session
+// goroutine once the decoder has moved and the device has been made to forget
+// what it held.
+func (e *Engine) landSeek(at time.Duration) {
+	e.mu.Lock()
 	e.pos = at
 	e.anchorAt = time.Now()
 	e.anchorFrame = 0
+	e.seeking = false
 	e.mu.Unlock()
-	if t != nil {
-		// The session restarts at the target, so its frame count starts again from
-		// zero: the position is then the target plus what the new session plays,
-		// not the target plus everything this session played before.
-		t.resetSubmitted()
-		t.seek(at)
-	}
 	e.notify()
-	return nil
 }
 
 // SetVolume sets the gain in 0..1, and unmutes.
@@ -810,6 +830,10 @@ func (e *Engine) Snapshot() Snapshot {
 // estimate is the clock kept inside the frames' bounds.
 func (e *Engine) positionLocked() time.Duration {
 	t := e.track
+	if e.seeking {
+		// The bar stays where the user put it while the sound catches up.
+		return e.seekTo
+	}
 	if t == nil || e.status == StatusPaused || e.status == StatusStopped || e.status == StatusFailed {
 		return e.pos
 	}
@@ -940,4 +964,46 @@ func framesToDuration(frames int64, rate int) time.Duration {
 		return 0
 	}
 	return time.Duration(float64(frames) / float64(rate) * float64(time.Second))
+}
+
+// takeSeeking reports whether a seek is pending and clears the mark.
+func (t *track) takeSeeking() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pending := t.seeking
+	t.seeking = false
+	return pending
+}
+
+// flush makes the device forget what it holds, by closing it and opening it
+// again. Closing is the only way to drop the buffered sound: the output plays
+// what it was given, so without this the seek would be preceded by a fragment of
+// where the song was before.
+//
+// A device that will not reopen leaves the session silent but moving, which is
+// what this client does on a machine with no sound card at all.
+func (t *track) flush(sink Sink) Sink {
+	if sink != nil {
+		_ = sink.Close()
+	}
+	next := t.engine.newSink()
+	if err := next.Open(t.format); err != nil {
+		t.engine.mu.Lock()
+		t.engine.device = false
+		t.engine.mu.Unlock()
+		return nil
+	}
+	t.engine.mu.Lock()
+	t.engine.device = true
+	t.engine.mu.Unlock()
+	return next
+}
+
+// land starts this session's clock at the position the seek asked for: the
+// counters describe what is written from here on, so the reported position is the
+// target plus what has been played since.
+func (t *track) land(at time.Duration) {
+	t.submitted.Store(0)
+	t.startedAt = time.Now()
+	t.engine.landSeek(at)
 }

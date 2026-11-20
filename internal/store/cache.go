@@ -258,3 +258,36 @@ func (c *Cache) ClearPartFiles() {
 		}
 	}
 }
+
+// ParseName reads a cache file name back into the song and the tier it holds.
+//
+// The name is the contract with the GTK client, so reading it is how a file that
+// appeared on disk becomes an entry in the library: a directory of files from
+// another client is adopted rather than ignored.
+func ParseName(name string) (songID int64, quality ncm.Quality, ok bool) {
+	rest, found := strings.CutPrefix(name, "music_")
+	if !found {
+		return 0, 0, false
+	}
+	idPart, bitratePart, found := strings.Cut(rest, "_")
+	if !found {
+		return 0, 0, false
+	}
+	id, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil || id == 0 {
+		return 0, 0, false
+	}
+	bitrate, err := strconv.Atoi(bitratePart)
+	if err != nil || bitrate <= 0 {
+		return 0, 0, false
+	}
+	// The bit rate in the name is the one Quality.Bitrate writes, so the match is
+	// exact; a name from a client that used another number is not decodable and is
+	// left alone rather than guessed at.
+	for q := ncm.QualityStandard; q < ncm.Quality(len(ncm.Qualities())); q++ {
+		if q.Bitrate() == bitrate {
+			return id, q, true
+		}
+	}
+	return 0, 0, false
+}

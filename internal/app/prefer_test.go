@@ -32,11 +32,10 @@ func cacheSong(t *testing.T, a *App, song ncm.Song, quality ncm.Quality) string 
 }
 
 // A better tier than the cached one is fetched, not skipped in favour of the
-// file on disk.
+// file on disk: the highest tier is what the client asks for by default, and a
+// lower file must not stand in for it.
 func TestABetterTierIsFetchedRatherThanTheCachedOne(t *testing.T) {
 	a := testApp(t)
-	// The account asks for lossless; the cache holds a standard file.
-	a.config.Quality = int(ncm.QualityLossless)
 	song := ncm.Song{ID: 7001, Name: "song", Duration: 2 * time.Second}
 	cacheSong(t, a, song, ncm.QualityStandard)
 
@@ -45,12 +44,12 @@ func TestABetterTierIsFetchedRatherThanTheCachedOne(t *testing.T) {
 		asked = quality
 		return []ncm.SongURL{{ID: song.ID, URL: "http://example.invalid/song", Quality: ncm.QualityLossless}}, nil
 	}
-	// The stream itself is not fetched here: what matters is that the cache was
-	// not chosen over a better answer.
 	a.resolveAndPlayAt(song, 0)
 	a.sync()
-	if asked != ncm.QualityLossless {
-		t.Fatalf("the network was asked for %v, want lossless", asked)
+	// The best tier the client can name is asked for; the server answers with
+	// what the account holds, and a cached standard file is not used instead.
+	if asked != ncm.QualityMaster {
+		t.Fatalf("the network was asked for %v, want the highest tier", asked)
 	}
 	a.engine.Close()
 }

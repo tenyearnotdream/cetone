@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vivaui/viva/ui"
@@ -134,7 +136,10 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 	// A trial fragment is not the song. Writing one to the cache would put a
 	// thirty-second clip where the full track belongs, and every later play would
 	// come from it, so it plays and is not kept.
-	cacheable := cacheableStream(song, resolved)
+	// Only the best tier is kept: a file at a lower tier would be what plays after
+	// the subscription ends, and it would never be the one worth having. A tier the
+	// user picked for this play is therefore played and not stored.
+	cacheable := cacheableStream(song, resolved) && a.isBestTier(song, resolved.Quality)
 	if cacheable {
 		source.CachePath = a.cache.Path(song.ID, resolved.Quality)
 	}
@@ -238,11 +243,19 @@ func cacheableStream(song ncm.Song, resolved ncm.SongURL) bool {
 // The account's own ceiling (Privilege.Level) is deliberately not used to cap
 // this: it reports "hires" for an account that the server happily serves
 // "jyeffect" for, so capping by it would hide a tier the account can play.
+// songQuality is the tier to ask for.
+//
+// A tier the user picked for this song wins. Otherwise the client asks for the
+// best one it can name and lets the server answer with what the account may
+// stream: the answer says which level it gave, so asking for more than the plan
+// holds costs a request and never a failure. That is why there is no account-wide
+// quality setting — the best tier is a property of the song and the account, not
+// a preference the user has to guess.
 func (a *App) songQuality(song ncm.Song) ncm.Quality {
-	if song.Selected != 0 {
+	if song.SelectedSet {
 		return song.Selected
 	}
-	return a.config.PreferredQuality()
+	return ncm.QualityMaster
 }
 
 // noteCachedQuality records the tier a song played at, so the list can show
@@ -253,7 +266,9 @@ func (a *App) noteCachedQuality(songID int64, quality ncm.Quality) {
 			continue
 		}
 		a.queue[i].Actual = quality
-		if a.queue[i].Selected == 0 {
+		if !a.queue[i].SelectedSet {
+			// Show the tier the server answered with, without making it a choice:
+			// the next play asks for the best again.
 			a.queue[i].Selected = quality
 		}
 	}
@@ -654,4 +669,154 @@ func (a *App) playingQuality(song ncm.Song) string {
 		return actual.String()
 	}
 	return ""
+}
+
+// isBestTier reports whether a tier is the highest this account can stream for the
+// song, which is the only one worth writing to the cache.
+//
+// Asking for the highest tier and letting the server answer lower is how the
+// ceiling is learned: the answer's quality is that ceiling, so the tier just
+// played is the best one exactly when it is not below what the song was asked for.
+func (a *App) isBestTier(song ncm.Song, played ncm.Quality) bool {
+	if !song.SelectedSet {
+		// Nothing was chosen: the request was for the highest, so the answer is
+		// the best the server will give.
+		return true
+	}
+	return played >= song.Selected
+}
+
+// fileWasCached records a file that just reached its final name. It runs on the
+// session's goroutine, so it only reads the name and the file, then hands the
+// record to the window thread.
+//
+// The name is the cache's own contract: music_<song>_<bitrate> names both the song
+// and the tier, so a file that appeared on disk becomes a table entry without the
+// engine knowing anything about songs.
+func (a *App) fileWasCached(path string) {
+	if a.library == nil || path == "" {
+		return
+	}
+	songID, quality, ok := store.ParseName(filepath.Base(path))
+	if !ok {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	entry := store.CacheEntry{
+		SongID:  songID,
+		Quality: quality,
+		File:    filepath.Base(path),
+		Size:    info.Size(),
+		SavedAt: time.Now(),
+		Best:    quality,
+	}
+	_ = a.library.Put(entry)
+	a.work.push(func() {
+		a.cached.setDirty()
+		song := ncm.Song{ID: songID, Name: entry.File}
+		for i := range a.queue {
+			if a.queue[i].ID == songID {
+				song = a.queue[i]
+				break
+			}
+		}
+		a.upgradeCache(song, quality)
+		a.invalidate()
+	})
+}
+
+// noteBestTier remembers the ceiling the server reported for a song, so a later
+// play knows whether a better file could be fetched.
+func (a *App) noteBestTier(song ncm.Song, played ncm.Quality) {
+	if a.library == nil {
+		return
+	}
+	_ = a.library.NoteBest(song.ID, played)
+}
+
+// upgradeCache fetches the best tier for a song whose file on disk is lower.
+//
+// This is what makes the cache worth having: after the subscription ends, the
+// songs that were heard while it was active play from disk at the tier that was
+// captured then, not at whatever happened to be streamed first.
+func (a *App) upgradeCache(song ncm.Song, have ncm.Quality) {
+	if a.library == nil {
+		return
+	}
+	if song.SelectedSet {
+		// The user asked for this tier on purpose: a lower one is not a gap to fill.
+		if song.Selected < have {
+			return
+		}
+	}
+	a.noteBestTier(song, have)
+	best, wanted := a.library.WantsBetter(song.ID)
+	if !wanted {
+		return
+	}
+	a.upgradeMu.Lock()
+	if a.upgrading[song.ID] {
+		a.upgradeMu.Unlock()
+		return
+	}
+	a.upgrading[song.ID] = true
+	a.upgradeMu.Unlock()
+
+	resolve := a.resolveURL
+	if resolve == nil {
+		resolve = a.client.SongURLs
+	}
+	httpClient := a.client.HTTPClient()
+	go func() {
+		defer func() {
+			a.upgradeMu.Lock()
+			delete(a.upgrading, song.ID)
+			a.upgradeMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		urls, err := resolve(ctx, []int64{song.ID}, best)
+		if err != nil || len(urls) == 0 || urls[0].URL == "" {
+			return
+		}
+		resolved := urls[0]
+		if resolved.Quality < best || !cacheableStream(song, resolved) {
+			// The server would not give the better tier, or answered with a trial:
+			// nothing worth writing.
+			return
+		}
+		source := player.Source{
+			Title:     song.Name,
+			Stream:    resolved.URL,
+			CachePath: a.cache.Path(song.ID, resolved.Quality),
+			Header:    http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
+		}
+		if err := player.FetchToCache(ctx, httpClient, source); err != nil {
+			return
+		}
+		a.work.push(func() {
+			if a.library == nil {
+				return
+			}
+			info, statErr := os.Stat(source.CachePath)
+			size := int64(0)
+			if statErr == nil {
+				size = info.Size()
+			}
+			_ = a.library.Put(store.CacheEntry{
+				SongID:  song.ID,
+				Quality: resolved.Quality,
+				File:    store.Name(song.ID, resolved.Quality),
+				Size:    size,
+				SavedAt: time.Now(),
+				Best:    resolved.Quality,
+			})
+			a.cached.setDirty()
+			a.toast("已缓存更高质量", song.Name+"："+resolved.Quality.String(), ui.ToastSuccess)
+		})
+		a.invalidate()
+	}()
 }

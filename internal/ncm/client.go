@@ -502,3 +502,8 @@ func uintString(n int) string { return strconv.Itoa(n) }
 func (c *Client) SetTransport(transport http.RoundTripper) {
 	c.http.Transport = transport
 }
+
+// HTTPClient is the client the API uses, for work that fetches audio rather than
+// calling the API: a cache fetch must go through the same transport, proxy and
+// timeouts as everything else.
+func (c *Client) HTTPClient() *http.Client { return c.http }

@@ -3,8 +3,6 @@ package app
 import (
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
-
-	"cetone/internal/ncm"
 )
 
 // minePage is 我的音乐: the account's playlists, and the three lists that are
@@ -100,21 +98,6 @@ func (a *App) settingsPage(c ui.C) {
 		ui.Column(c).FillWidth().Pad(24).Gap(16).MaxWidth(760).Children(func() {
 			// Playback.
 			a.settingsCard(c, "播放", func() {
-				ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
-					ui.Column(c).Gap(2).Grow(1).Children(func() {
-						ui.Text(c, "音质").FontSize(13)
-						ui.Text(c, "会员失效后，已缓存的歌曲仍按缓存文件的音质播放").FontSize(11).Muted()
-					})
-					quality := a.config.PreferredQuality()
-					choices := ncm.Qualities()
-					qualitySelect := ui.Select(c, &quality, choices, ncm.Quality.String).Width(160)
-					qualitySelect.Label("音质")
-					if qualitySelect.Changed() {
-						a.config.Quality = int(quality)
-						a.saveConfig()
-					}
-				})
-				ui.Divider(c)
 				ui.Row(c).FillWidth().Items(ui.Center).Gap(12).Children(func() {
 					ui.Column(c).Gap(2).Grow(1).Children(func() {
 						ui.Text(c, "跳过无版权歌曲").FontSize(13)

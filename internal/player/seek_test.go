@@ -27,12 +27,21 @@ type pacedSink struct {
 	played int64
 	last   time.Time
 	stop   chan struct{}
-	once   sync.Once
 }
 
 func (s *pacedSink) Open(format Format) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stop == nil {
+		s.stop = make(chan struct{})
+	}
 	s.format = format
+	// A reopened device starts its clock again: the frames counted before belong
+	// to the buffer that was just thrown away, and a closed sink's stop channel is
+	// replaced, or every later write would return at once and the session would
+	// run at the speed of the decoder.
 	s.start = time.Now()
+	s.played = 0
 	return nil
 }
 
@@ -55,7 +64,12 @@ func (s *pacedSink) Write(pcm []byte) (int, error) {
 }
 
 func (s *pacedSink) Close() error {
-	s.once.Do(func() { close(s.stop) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stop != nil {
+		close(s.stop)
+		s.stop = nil
+	}
 	return nil
 }
 
@@ -72,7 +86,7 @@ func TestASeekLandsAndTheSoundReturns(t *testing.T) {
 	}
 	e := NewEngine()
 	defer e.Close()
-	sink := &pacedSink{stop: make(chan struct{})}
+	sink := &pacedSink{}
 	e.NewSink = func() Sink { return sink }
 	if err := e.Play(context.Background(), Source{Title: "tone", File: path, Duration: 30 * time.Second}); err != nil {
 		t.Fatal(err)
