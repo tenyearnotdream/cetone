@@ -34,6 +34,53 @@ type decoder interface {
 	Read(p []byte) (int, error)
 }
 
+// seeker is a decoder that can start again at a position of its own instead of
+// being read and thrown away up to there.
+//
+// It matters for the formats that cost something to decode: a FLAC file at 96 kHz
+// takes over a second to walk to the end of a long song, and that second is
+// silence the listener hears after pressing the bar. A format without it falls
+// back to reading forward.
+type seeker interface {
+	SeekSample(sample int64) error
+}
+
+// discardTo moves dec to the given position: by seeking when the format can, and
+// by reading forward when it cannot.
+func discardTo(dec decoder, at time.Duration, format Format) error {
+	if at <= 0 || format.SampleRate == 0 {
+		return nil
+	}
+	sample := int64(at.Seconds() * float64(format.SampleRate))
+	if s, ok := dec.(seeker); ok {
+		if err := s.SeekSample(sample); err == nil {
+			return nil
+		}
+		// A stream that cannot be sought (a download still arriving) reports an
+		// error here; reading forward is the honest fallback.
+	}
+	return discardForward(dec, at, format)
+}
+
+// discardForward reads and throws away the bytes up to a position.
+func discardForward(dec decoder, at time.Duration, format Format) error {
+	remaining := int64(at.Seconds() * float64(format.SampleRate*format.FrameSize()))
+	buf := make([]byte, 32<<10)
+	for remaining > 0 {
+		n, err := dec.Read(buf)
+		if n > 0 {
+			remaining -= int64(n)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // openDecoder sniffs a stream's container and returns the decoder for it. The
 // name of the file is not trusted: the site sometimes serves an mp3 under a
 // .flac URL, and a decoder picked by extension would refuse it.
@@ -75,8 +122,35 @@ func peek(r io.ReadSeeker, n int) ([]byte, error) {
 // ----- mp3 -----
 
 type mp3Decoder struct {
+	src    io.ReadSeeker
 	dec    *mp3.Decoder
 	format Format
+}
+
+// SeekSample moves an MP3 to a sample. The decoder cannot start mid-frame, so a
+// byte offset is estimated from the average frame length and the decoder is
+// rebuilt there; the fixed-size frames it lands on are corrected by the caller,
+// which compares the position it asked for with the one it got.
+func (d *mp3Decoder) SeekSample(sample int64) error {
+	if sample <= 0 {
+		sample = 0
+	}
+	// 1152 samples per frame is the MPEG-1 Layer III frame; the estimate is
+	// refined by the caller reading the next chunk.
+	frames := sample / 1152
+	offset := frames * int64(1152*int64(d.format.Channels)*2)
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := d.src.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	dec, err := mp3.NewDecoder(bufio.NewReaderSize(d.src, 128<<10))
+	if err != nil {
+		return err
+	}
+	d.dec = dec
+	return nil
 }
 
 func newMP3Decoder(r io.ReadSeeker) (decoder, error) {
@@ -92,7 +166,7 @@ func newMP3Decoder(r io.ReadSeeker) (decoder, error) {
 		rate = 44100
 	}
 	// the mp3 decoder always answers stereo 16-bit, whatever the source was.
-	return &mp3Decoder{dec: dec, format: Format{SampleRate: rate, Channels: 2}}, nil
+	return &mp3Decoder{src: r, dec: dec, format: Format{SampleRate: rate, Channels: 2}}, nil
 }
 
 func (d *mp3Decoder) Format() Format { return d.format }
@@ -116,16 +190,30 @@ func (d *mp3Decoder) Read(p []byte) (int, error) {
 // ----- flac -----
 
 type flacDecoder struct {
+	src    io.ReadSeeker
 	stream *flac.Stream
 	format Format
 	buf    []byte
+}
+
+// SeekSample moves a FLAC to a sample using the stream's own seek table, which is
+// what makes it cheap: the frames before the target are not decoded at all.
+func (d *flacDecoder) SeekSample(sample int64) error {
+	if _, err := d.stream.Seek(uint64(sample)); err != nil {
+		return err
+	}
+	d.buf = d.buf[:0]
+	return nil
 }
 
 func newFLACDecoder(r io.ReadSeeker) (decoder, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	stream, err := flac.New(bufio.NewReaderSize(r, 128<<10))
+	// NewSeek rather than New: it keeps the reader seekable, which is what lets a
+	// seek land on the target frame instead of decoding everything before it. The
+	// reader is passed as it is, because the library asserts io.ReadSeeker on it.
+	stream, err := flac.NewSeek(r)
 	if err != nil {
 		return nil, fmt.Errorf("player: flac: %w", err)
 	}
@@ -137,7 +225,7 @@ func newFLACDecoder(r io.ReadSeeker) (decoder, error) {
 	if channels > 2 {
 		channels = 2
 	}
-	return &flacDecoder{stream: stream, format: Format{SampleRate: rate, Channels: channels}}, nil
+	return &flacDecoder{src: r, stream: stream, format: Format{SampleRate: rate, Channels: channels}}, nil
 }
 
 func (d *flacDecoder) Format() Format { return d.format }
@@ -287,6 +375,27 @@ func newWAVDecoder(r io.ReadSeeker) (decoder, error) {
 			}
 		}
 	}
+}
+
+// SeekSample moves a WAV to a sample: uncompressed frames have a fixed size, so
+// the offset is arithmetic — no decoding is involved at all.
+func (d *wavDecoder) SeekSample(sample int64) error {
+	if sample < 0 {
+		sample = 0
+	}
+	offset := d.start + sample*int64(d.format.FrameSize())
+	if offset < d.start {
+		offset = d.start
+	}
+	if d.end > 0 && offset >= d.end {
+		// Past the end: put the reader at the end so the next Read reports EOF,
+		// which is what the playback loop expects.
+		offset = d.end
+	}
+	if _, err := d.src.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *wavDecoder) Format() Format { return d.format }

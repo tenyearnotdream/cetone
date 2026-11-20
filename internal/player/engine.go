@@ -284,7 +284,7 @@ func (t *track) run() {
 		t.mu.Unlock()
 
 		if at > 0 {
-			if err := discard(dec, at, t.format); err != nil {
+			if err := discardTo(dec, at, t.format); err != nil {
 				t.engine.fail(t, err)
 				return
 			}
@@ -315,29 +315,21 @@ func (t *track) run() {
 			return
 		}
 
-		// A seek: rebuild the decoder at the same byte source, from its first
-		// byte, so the discard below starts at the beginning of the song rather
-		// than where the last read stopped. The sink stays open: one source has
-		// one format, so no rate change can happen here.
+		// A seek: move the decoder itself to the target. Rebuilding it from byte
+		// zero and reading forward is what made a seek to the end of a FLAC song
+		// go silent for over a second; the formats that can seek land on the
+		// frame directly. The sink stays open: one source has one format, so no
+		// rate change can happen here.
 		t.mu.Lock()
 		pending := t.at
+		dec = t.dec
 		t.mu.Unlock()
-		if _, err := t.reader.Seek(0, io.SeekStart); err != nil {
-			// A stream that has not finished downloading cannot always rewind;
-			// the seek then applies from where the reader is, which is the
-			// closest the engine can honestly get.
-			_ = err
-		}
-		dec, err = openDecoder(t.reader)
-		if err != nil {
+		if err := discardTo(dec, pending, t.format); err != nil {
 			t.engine.fail(t, err)
 			return
 		}
 		t.mu.Lock()
-		t.dec = dec
-		t.mu.Unlock()
-		t.mu.Lock()
-		t.at = pending
+		t.at = 0
 		t.mu.Unlock()
 	}
 }
@@ -376,12 +368,13 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 		case at := <-t.seekCh:
 			t.mu.Lock()
 			t.at = at
+			t.mu.Unlock()
+			t.resetSubmitted()
 			t.engine.mu.Lock()
 			t.engine.pos = at
 			t.engine.anchorAt = time.Now()
-			t.engine.anchorFrame = t.submitted.Load()
+			t.engine.anchorFrame = 0
 			t.engine.mu.Unlock()
-			t.mu.Unlock()
 			return pumpRestart, nil
 		case <-t.stop:
 			return pumpStopped, nil
@@ -460,6 +453,15 @@ func (t *track) seek(at time.Duration) {
 // than at the end of the track: a user who quits halfway keeps what was
 // downloaded.
 //
+// resetSubmitted forgets the frames written before a seek: the session starts
+// again at the target, so what it played before is not part of the new position.
+//
+// The caller holds no lock: the engine's anchor is taken under the engine's own
+// mutex here, which keeps the two locks from being taken in both orders.
+func (t *track) resetSubmitted() {
+	t.submitted.Store(0)
+}
+
 // awaitPlayedOut waits until the device has had time to play what was written,
 // then reports the end of the source.
 //
@@ -487,12 +489,13 @@ func (t *track) awaitPlayedOut() (pumpOutcome, error) {
 		case at := <-t.seekCh:
 			t.mu.Lock()
 			t.at = at
+			t.mu.Unlock()
+			t.resetSubmitted()
 			t.engine.mu.Lock()
 			t.engine.pos = at
 			t.engine.anchorAt = time.Now()
-			t.engine.anchorFrame = t.submitted.Load()
+			t.engine.anchorFrame = 0
 			t.engine.mu.Unlock()
-			t.mu.Unlock()
 			return pumpRestart, nil
 		case <-t.stop:
 			return pumpStopped, nil
@@ -731,6 +734,10 @@ func (e *Engine) Seek(at time.Duration) error {
 	e.anchorFrame = 0
 	e.mu.Unlock()
 	if t != nil {
+		// The session restarts at the target, so its frame count starts again from
+		// zero: the position is then the target plus what the new session plays,
+		// not the target plus everything this session played before.
+		t.resetSubmitted()
 		t.seek(at)
 	}
 	e.notify()
@@ -821,7 +828,15 @@ func (e *Engine) positionLocked() time.Duration {
 	if estimate < 0 {
 		estimate = 0
 	}
-	return e.pos + estimate
+	// A session counts the frames it has written, and the device holds some of
+	// them still: adding the whole count would run ahead by the buffer. The clock
+	// since the anchor is the smaller of the two, which is what makes it the
+	// position the listener is hearing.
+	position := e.pos + estimate
+	if e.duration > 0 && position > e.duration {
+		position = e.duration
+	}
+	return position
 }
 
 // serveLocked records that a track is now audible. A track the engine has let go
