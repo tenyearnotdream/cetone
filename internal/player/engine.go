@@ -444,9 +444,16 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 					}
 					return pumpStopped, werr
 				}
-			} else if n > 0 {
-				// No device: keep real time so the position stays honest.
-				wait := time.Duration(float64(n) / float64(bytesPerSecond) * float64(time.Second))
+			}
+			t.submitted.Add(int64(n / frameSize))
+			// The session paces itself. A sound server on Linux (PipeWire,
+			// PulseAudio) accepts seconds of audio into its own buffer before it
+			// asks for no more, so waiting for the sink to block does not keep the
+			// music at the speed of the music: measured here, ten seconds of audio
+			// were accepted in four milliseconds. Without this the decoder runs to
+			// the end of the song at once, the device holds minutes of sound, and
+			// the reported position means nothing.
+			if wait := t.paceWait(); wait > 0 {
 				select {
 				case <-t.stop:
 					return pumpStopped, nil
@@ -455,7 +462,6 @@ func (t *track) pump(dec decoder, sink Sink) (pumpOutcome, error) {
 				case <-time.After(wait):
 				}
 			}
-			t.submitted.Add(int64(n / frameSize))
 			if t.dl != nil {
 				if written, total := t.dl.progress(); total > 0 {
 					t.engine.setBuffered(float64(written) / float64(total))
@@ -509,6 +515,28 @@ func (t *track) seek(at time.Duration) {
 // mutex here, which keeps the two locks from being taken in both orders.
 func (t *track) resetSubmitted() {
 	t.submitted.Store(0)
+}
+
+// maxLead is how far ahead of real time a session may write. It is a little more
+// than one chunk, so the device is never left starving, and small enough that a
+// pause or a seek takes effect at once and the reported position is what is being
+// heard.
+const maxLead = 120 * time.Millisecond
+
+// paceWait is how long the session should sleep to stay at the speed of the music.
+// It is zero when the sink already blocks (a real ALSA device does), so the wait
+// costs nothing in the common case.
+func (t *track) paceWait() time.Duration {
+	rate := t.format.SampleRate
+	if rate <= 0 {
+		return 0
+	}
+	written := framesToDuration(t.submitted.Load(), rate)
+	lead := written - time.Since(t.startedAt)
+	if lead <= maxLead {
+		return 0
+	}
+	return lead - maxLead
 }
 
 // awaitPlayedOut waits until the device has had time to play what was written,
@@ -683,6 +711,11 @@ func (e *Engine) Play(ctx context.Context, source Source) error {
 	e.buffered = 1
 	e.anchorAt = time.Now()
 	e.anchorFrame = 0
+	// The position a seek asked for belonged to the session that asked: carrying
+	// it here made the next song report the old target, which a listener sees as a
+	// new song starting part-way in.
+	e.seeking = false
+	e.seekTo = 0
 	e.status = StatusPlaying
 	if t.dl != nil {
 		e.buffered = 0
@@ -736,6 +769,10 @@ func (e *Engine) Pause() {
 	e.pos = e.positionLocked()
 	e.track = nil
 	e.status = StatusPaused
+	// Pausing settles where the sound is: a seek still in flight has no session to
+	// land in.
+	e.seeking = false
+	e.seekTo = 0
 	e.mu.Unlock()
 	if t != nil {
 		t.Close()
@@ -759,6 +796,10 @@ func (e *Engine) Stop() {
 	e.track = nil
 	e.status = StatusStopped
 	e.pos = 0
+	// A seek that was still settling died with the session; its target must not
+	// outlive it.
+	e.seeking = false
+	e.seekTo = 0
 	e.mu.Unlock()
 	if t != nil {
 		t.Close()
@@ -799,8 +840,17 @@ func (e *Engine) Seek(at time.Duration) error {
 // landSeek records that the session is at the target, called from the session
 // goroutine once the decoder has moved and the device has been made to forget
 // what it held.
-func (e *Engine) landSeek(at time.Duration) {
+func (e *Engine) landSeek(t *track, at time.Duration) {
 	e.mu.Lock()
+	// Only the session that is playing may say where the sound is. A seek that was
+	// still settling when the listener skipped is landed by the session that asked
+	// for it, and that session has been replaced: recording its target here put the
+	// new song's bar at the old song's position — which a listener sees as a song
+	// starting part-way in, every time the previous one was skipped mid-seek.
+	if e.track != t {
+		e.mu.Unlock()
+		return
+	}
 	// A newer seek has been asked for since this one started moving the decoder.
 	// Recording this position would put the bar and the sound at the older place,
 	// which is what a drag across the bar used to do.
@@ -894,21 +944,27 @@ func (e *Engine) positionLocked() time.Duration {
 	if rate <= 0 {
 		return e.pos
 	}
-	played := framesToDuration(t.submitted.Load()-e.anchorFrame, rate)
+	// The position is the time since the anchor, never more than what has been
+	// written. Two bounds, both needed:
+	//
+	//   - the clock, because that is what the listener hears (the session paces
+	//     itself to real time, so the clock is the honest measure);
+	//   - the frames written, because a stream waiting on the network must not
+	//     report a position past the sound that exists.
+	//
+	// An earlier version also forced the estimate up to "frames written minus
+	// 350 ms" to stop the bar lagging. That made the bar follow the frames rather
+	// than the clock, so on a sound server that accepts a buffer of seconds at
+	// once the bar jumped to wherever the buffer reached — a new song appeared to
+	// start twelve seconds in.
+	written := framesToDuration(t.submitted.Load()-e.anchorFrame, rate)
 	estimate := time.Since(e.anchorAt)
-	if estimate > played {
-		estimate = played
-	}
-	if behind := played - 350*time.Millisecond; estimate < behind {
-		estimate = behind
+	if estimate > written {
+		estimate = written
 	}
 	if estimate < 0 {
 		estimate = 0
 	}
-	// A session counts the frames it has written, and the device holds some of
-	// them still: adding the whole count would run ahead by the buffer. The clock
-	// since the anchor is the smaller of the two, which is what makes it the
-	// position the listener is hearing.
 	position := e.pos + estimate
 	if e.duration > 0 && position > e.duration {
 		position = e.duration
@@ -1071,5 +1127,5 @@ func (t *track) land(at time.Duration) {
 	t.submitted.Store(0)
 	t.decoded.Store(samplesAt(at, t.format))
 	t.startedAt = time.Now()
-	t.engine.landSeek(at)
+	t.engine.landSeek(t, at)
 }
