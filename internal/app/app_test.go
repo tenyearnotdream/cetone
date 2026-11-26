@@ -210,13 +210,13 @@ func TestUnplayableButCachedSongsSurviveFiltering(t *testing.T) {
 		t.Fatal("the fixture is meant to be unplayable")
 	}
 	a.config.IgnoreUnplayable = true
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	if kept := a.playable([]ncm.Song{song}); len(kept) != 0 {
 		t.Fatal("an unplayable song that is not cached survived the filter")
 	}
 
 	writeTestWav(t, a.cache.Path(42, ncm.QualityExtreme), 8000, 2, 0.2)
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	if kept := a.playable([]ncm.Song{song}); len(kept) != 1 {
 		t.Fatal("the cached copy of an unplayable song was filtered out")
 	}
@@ -257,23 +257,23 @@ func TestCacheIndexReadsTheDirectoriesOnce(t *testing.T) {
 	writeTestWav(t, a.cache.Path(1, ncm.QualityStandard), 8000, 2, 0.1)
 	writeTestWav(t, a.cache.Path(1, ncm.QualityLossless), 8000, 2, 0.1)
 	writeTestWav(t, a.cache.Path(2, ncm.QualityExtreme), 8000, 2, 0.1)
-	a.cached.setDirty()
-	if quality, ok := a.cached.quality(1); !ok || quality != ncm.QualityLossless {
+	a.cached.SetDirty()
+	if quality, ok := a.cached.BestQuality(1); !ok || quality != ncm.QualityLossless {
 		t.Fatalf("song 1 is reported at %v (%v)", quality, ok)
 	}
-	if !a.cached.has(2) {
+	if !a.cached.Has(2) {
 		t.Fatal("song 2 was not found in the cache")
 	}
-	if a.cached.has(3) {
+	if a.cached.Has(3) {
 		t.Fatal("a song that was never cached was reported")
 	}
 	// A file that arrives later is picked up once the index is told.
 	writeTestWav(t, a.cache.Path(3, ncm.QualityExtreme), 8000, 2, 0.1)
-	if a.cached.has(3) {
+	if a.cached.Has(3) {
 		t.Fatal("the index picked up a file without being told")
 	}
-	a.cached.setDirty()
-	if !a.cached.has(3) {
+	a.cached.SetDirty()
+	if !a.cached.Has(3) {
 		t.Fatal("the index did not rescan after being told")
 	}
 }
@@ -293,7 +293,7 @@ func TestABrokenCacheFileFallsBackToTheNetwork(t *testing.T) {
 	if err := os.WriteFile(path, []byte("<html><body>502 Bad Gateway</body></html>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	a.queue = []ncm.Song{song}
 	a.queueAt = 0
 	a.resolveAndPlay(song)
@@ -317,7 +317,7 @@ func TestACachedSongPlaysWithTheNetworkOff(t *testing.T) {
 	song := ncm.Song{ID: 99, Name: "offline", Duration: 2 * time.Second, Fee: 1}
 	song.Privilege = ncm.Privilege{Status: -1}
 	writeTestWav(t, a.cache.Path(99, a.config.PreferredQuality()), 8000, 2, 1.2)
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	a.queue = []ncm.Song{song}
 	a.queueAt = 0
 	a.engine.NewSink = func() playerSink { return &countingSink{} }
@@ -396,7 +396,7 @@ func TestTheSeekSliderMovesTheTransport(t *testing.T) {
 	a := testApp(t)
 	song := ncm.Song{ID: 5, Name: "seek me", Duration: 2 * time.Second}
 	writeTestWav(t, a.cache.Path(5, a.config.PreferredQuality()), 8000, 2, 2)
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	a.queue = []ncm.Song{song}
 	a.queueAt = 0
 	a.engine.NewSink = func() playerSink { return &countingSink{} }

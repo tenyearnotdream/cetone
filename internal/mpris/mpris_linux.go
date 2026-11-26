@@ -132,6 +132,7 @@ func (s *Server) Update(track Track, status Status, position Duration, volume fl
 	}
 	s.props.SetMust("org.mpris.MediaPlayer2.Player", "PlaybackStatus", statusName)
 	s.props.SetMust("org.mpris.MediaPlayer2.Player", "Metadata", s.metadata())
+	s.props.SetMust("org.mpris.MediaPlayer2.Player", "Position", int64(position))
 	s.props.SetMust("org.mpris.MediaPlayer2.Player", "Volume", math.Max(0, math.Min(1, volume)))
 }
 

@@ -3,6 +3,7 @@ package player
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/vivaui/viva/audio"
@@ -52,7 +53,11 @@ func (s *deviceSink) Write(pcm []byte) (int, error) {
 	// The device is written without holding the lock: a Write blocks while the
 	// device holds enough sound, and holding the lock there would stop a pause
 	// from closing the sink until the write returned.
-	return out.Write(pcm)
+	n, err := out.Write(pcm)
+	if errors.Is(err, audio.ErrClosed) {
+		return n, os.ErrClosed
+	}
+	return n, err
 }
 
 func (s *deviceSink) Close() error {

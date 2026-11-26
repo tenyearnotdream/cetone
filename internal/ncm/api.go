@@ -810,7 +810,7 @@ func CoverBox(raw string, width, height int) string {
 	if strings.Contains(raw, "music.126.net") || strings.Contains(raw, "126.net") {
 		if u, err := url.Parse(raw); err == nil {
 			q := u.Query()
-			q.Set("param", fmt.Sprintf("%d y %d", width, height))
+			q.Set("param", fmt.Sprintf("%dy%d", width, height))
 			u.RawQuery = q.Encode()
 			return u.String()
 		}

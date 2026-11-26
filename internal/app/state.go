@@ -33,135 +33,113 @@ type App struct {
 	sessions *store.Sessions
 	queues   *store.QueueStore
 	cache    *store.Cache
+	cached   *store.CacheIndex
+	library  *store.Library
 	lyrics   *store.LyricStore
 	covers   *store.CoverStore
 
 	client *ncm.Client
 	engine *player.Engine
 
-	// resolveURL is the client's URL endpoint. It is a field so a test can serve
-	// a stream without the API, and so the one call that decides whether a song
-	// is a full track or a trial has a single place to be exercised from.
+	// resolveURL defaults to client.SongURLs and can be overridden in tests.
 	resolveURL func(ctx context.Context, ids []int64, quality ncm.Quality) ([]ncm.SongURL, error)
 
-	config store.Config
-	user   ncm.UserInfo
+	config  store.Config
+	user    ncm.UserInfo
+	userVIP atomic.Int64 // mirrors user.VIPType for safe reads from playback workers
 
-	// inv wakes the window when a worker publishes. It is set by Run and by the
-	// page's Config.
+	// inv wakes the window when a worker publishes.
 	inv atomic.Pointer[app.Invalidator]
 
-	// work is the queue of closures a worker published for the window thread.
+	// work is the queue of closures published by workers for the window thread.
 	work *workQueue
 
-	// nav is the page stack; the last entry is what is on screen.
+	// nav is the page stack; the last entry is on screen.
 	nav []route
 
-	// data is what each page loaded, keyed by the route it belongs to.
+	// data holds loaded page payloads.
 	data pageData
 
-	// bitmaps caches decoded album art by URL and size.
-	bitmaps map[coverKey]gfx.Bitmap
-	// cached is the set of songs with a cache file, rebuilt when one arrives so
-	// a list of a thousand rows does not stat the disk per paint.
-	cached *cacheIndex
-	// coverMisses remembers art that failed, so a broken URL is not refetched
-	// on every paint.
-	coverMisses map[coverKey]bool
-	// coverLoading marks art a worker is fetching, so a paint asks once.
+	// Cover art cache and in-flight tracking.
+	bitmaps      map[coverKey]gfx.Bitmap
+	coverMisses  map[coverKey]bool
 	coverLoading map[coverKey]bool
 
-	// queue is the play queue and its cursor.
+	// Play queue and playback orchestration.
 	queue    []ncm.Song
 	queueAt  int
 	playing  bool
 	likedSet map[int64]bool
 
-	// view state that is neither data nor navigation.
+	// playGen monotonically numbers playback starts so stale async URL
+	// resolutions from earlier clicks never overwrite a newer selection.
+	playGen      atomic.Uint64
+	playCancelMu sync.Mutex
+	playCancel   context.CancelFunc
+
+	// Background highest-quality cache upgrades in flight, keyed by song ID.
+	upgradeMu sync.Mutex
+	upgrading map[int64]bool
+
+	// View state.
 	search        searchState
 	queuePanel    bool
 	login         loginState
 	toaster       ui.Toaster
 	volumeDrag    ui.SliderState
 	seekDrag      ui.SliderState
-	rowMenuOpen   bool
+	seekTarget    time.Duration
+	seekPending   bool
 	searchFocused bool
-	// queueList and lyricList keep the lists' scroll and choice between paints.
-	queueList ui.ListState
-	lyricList ui.ListState
+	queueList     ui.ListState
+	lyricList     ui.ListState
+	lastLyricSong int64
+	lastLyricLine int
 
-	// form buffers for the settings page. The fields themselves are declared
-	// where they are used; only the values they bind live here.
+	// Per-row action menu and player-bar quality menu state.
+	rowMenuOpen     bool
+	rowMenuSongID   int64
+	qualityMenuOpen bool
+
+	// Settings form buffers, initialized once from config so clearing them works.
 	proxyText     string
 	cacheDirsText string
 
-	// noRemote suppresses background I/O during a paint; it exists only for the
-	// startup investigation and is set from NCMVIVA_NOREMOTE.
+	// noRemote suppresses remote fetches during paints when set via env.
 	noRemote bool
 
-	// heartbeat is 心动模式: the queue extends itself from the recommender.
-	heartbeat bool
-	// heartbeatPlaylist is the playlist the queue was started from, which seeds
-	// the recommender.
+	// 心动模式 (heartbeat radio).
+	heartbeat         bool
 	heartbeatPlaylist int64
 
-	// resumeAt is the position a restored queue should continue from.
+	// resumeAt is the position a restored queue continues from on first Play.
 	resumeAt time.Duration
-	// window, application, the status item and the MPRIS server are the desktop
-	// integration.
-	window        *app.Window
-	application   *app.Application
-	mprisServer   mprisServer
-	quitRequested bool
-	// stopAppearance ends the desktop appearance watch, when one is running.
+
+	// Desktop integration.
+	window         *app.Window
+	application    *app.Application
+	mprisServer    mprisServer
+	lastMPRISAt    time.Time
+	quitRequested  bool
 	stopAppearance func()
 
-	// library is the table beside the audio files: which song is cached at which
-	// tier, and the best tier the server has offered for it.
-	library *store.Library
-
-	// upgrading holds the songs whose better file is being fetched right now, so
-	// a play that repeats does not start a second transfer.
-	upgradeMu sync.Mutex
-	upgrading map[int64]bool
-
-	// ocean is the background texture, drawn once per appearance.
+	// Visual state.
 	ocean oceanTexture
-
-	// seekTarget is where the user asked to be, and seekPending says the request
-	// has not reached the transport yet. A drag reports a change on every pixel;
-	// the request is applied once the pointer lets go, so the decoder is rebuilt
-	// once instead of continuously.
-	seekTarget  time.Duration
-	seekPending bool
-
-	// qualityMenuOpen is whether the tier menu under the transport is open.
-	qualityMenuOpen bool
-
-	// theme is what the window paints with. It is a field, not a value built per
-	// call, because the page keeps a pointer to it: reassigning it is how a theme
-	// change reaches the screen.
 	theme gfx.Theme
-
-	// brand is the application's icon, decoded once for the page's header.
 	brand struct {
 		Decoded bool
 		Dark    bool
 		Bitmap  gfx.Bitmap
 	}
 
-	// tray is the status item, when the desktop has a status area for one.
-	tray          *app.StatusItem
-	trayAvailable bool
-	// trayUnavailable is set when the desktop reported that it has no status
-	// area, which is a normal machine, not a failure to report.
+	// System tray state.
+	tray            *app.StatusItem
+	trayAvailable   bool
 	trayUnavailable bool
 	trayErr         error
-	// toastSeq counts the toasts this run showed, for tests.
+
 	toastSeq int
-	// now is the animation clock of the last paint, kept for the player bar's
-	// position readout.
-	now time.Duration
+	now      time.Duration
 }
 
 // mprisServer is the interface the app needs of the media-controls server.
@@ -171,19 +149,16 @@ type mprisServer interface {
 	Close()
 }
 
-// coverKey identifies one decoded cover.
 type coverKey struct {
 	url    string
 	width  int
 	height int
 }
 
-// route is one page in the navigation stack.
 type route struct {
-	kind  routeKind
-	id    int64
-	title string
-	// kind-specific payload, already loaded or to be loaded.
+	kind     routeKind
+	id       int64
+	title    string
 	playlist ncm.Playlist
 	album    ncm.Album
 	artist   ncm.Artist
@@ -206,32 +181,37 @@ const (
 	routeQueue
 )
 
-// New builds the application from its directories. It reads the settings, the
-// session and the queue; a broken file is reported as a toast rather than
-// stopping the window.
+// New builds the application from its directories, loading settings, session,
+// queue and cache index.
 func New(paths store.Paths) (*App, error) {
 	if err := paths.Ensure(); err != nil {
 		return nil, err
 	}
 	a := &App{
-		paths:        paths,
-		settings:     store.NewSettings(paths),
-		sessions:     store.NewSessions(paths),
-		queues:       store.NewQueueStore(paths),
-		lyrics:       store.NewLyricStore(paths),
-		covers:       store.NewCoverStore(paths),
-		work:         newWorkQueue(),
-		bitmaps:      make(map[coverKey]gfx.Bitmap),
-		coverMisses:  make(map[coverKey]bool),
-		coverLoading: make(map[coverKey]bool),
-		likedSet:     make(map[int64]bool),
+		paths:         paths,
+		settings:      store.NewSettings(paths),
+		sessions:      store.NewSessions(paths),
+		queues:        store.NewQueueStore(paths),
+		lyrics:        store.NewLyricStore(paths),
+		covers:        store.NewCoverStore(paths),
+		work:          newWorkQueue(),
+		bitmaps:       make(map[coverKey]gfx.Bitmap),
+		coverMisses:   make(map[coverKey]bool),
+		coverLoading:  make(map[coverKey]bool),
+		likedSet:      make(map[int64]bool),
+		upgrading:     make(map[int64]bool),
+		lastLyricLine: -1,
 	}
 	config, err := a.settings.Load()
 	if err != nil {
 		a.notifyLater("设置文件损坏", "已使用默认设置："+err.Error())
 	}
 	a.config = config
+	a.proxyText = config.Proxy
+	a.cacheDirsText = joinLines(config.CacheDirs)
+
 	a.cache = store.NewCache(paths, config.CacheDirs)
+	a.cached = store.NewCacheIndex(a.cache)
 	a.library = store.NewLibrary(paths)
 	_ = a.library.Load()
 
@@ -242,55 +222,49 @@ func New(paths store.Paths) (*App, error) {
 	a.client = client
 	if session, ok, err := a.sessions.Load(); err == nil && ok {
 		client.LoadCookies(session.Cookies)
-		a.user = session.User
+		a.setUser(session.User)
 	}
 	if queue, ok, err := a.queues.Load(); err == nil && ok {
 		a.queue = queue.Songs
 		a.queueAt = queue.Index
 	}
 
-	a.cached = newCacheIndex(a.cache)
 	a.resolveURL = a.client.SongURLs
 	a.engine = player.NewEngine()
+	a.engine.HTTP = client.HTTPClient()
 	a.engine.SetVolume(config.Volume)
 	a.engine.SetMuted(config.Muted)
-	// The engine reports from its own goroutine, which can start before the window
-	// exists (a test, or a restored queue): the field is given an invalidator now
-	// so the first read is not a race with Page's write. Page replaces it with the
-	// window's own, which is the same type.
 	a.inv.Store(&app.Invalidator{})
 	a.engine.OnChange = a.invalidate
 	a.engine.OnFinish = func() {
 		a.work.push(func() { a.finishedTrack() })
 		a.invalidate()
 	}
-	// A finished download is when a song actually has a file: the library records
-	// it then, from the name the cache gave it, which is the contract with the GTK
-	// client and names both the song and the tier.
 	a.engine.OnCacheWritten = func(path string) {
-		a.cached.setDirty()
+		a.cached.SetDirty()
 		a.fileWasCached(path)
 	}
-	a.upgrading = make(map[int64]bool)
 	a.volumeDrag = ui.SliderState{Value: float32(config.Volume * 100)}
+	a.initLists()
+	a.initQueueList()
 
 	a.noRemote = os.Getenv("NCMVIVA_NOREMOTE") == "1"
 	a.nav = []route{{kind: routeDiscover, title: "发现"}}
 	return a, nil
 }
 
+func (a *App) setUser(user ncm.UserInfo) {
+	a.user = user
+	a.userVIP.Store(int64(user.VIPType))
+}
+
+func (a *App) currentVIP() int {
+	return int(a.userVIP.Load())
+}
+
 // ----- the window -----
 
-// Page builds the page and its window config. The returned config already
-// carries the Invalidator workers wake, and the application holds that same
-// value: replacing config.Invalidator with a fresh one afterwards would leave
-// the application waking an invalidator no window listens to, and a worker's
-// result would never be painted.
-//
-// It also carries OnWake, which drains the work queue before each repaint. That
-// is what makes a worker's result visible: the wake asks for the repaint, and
-// the drain is what puts the result in the model the repaint reads. A window
-// opened with this config — by Run or by a test — behaves the same way.
+// Page builds the page and its window config with Invalidator and OnWake wired.
 func (a *App) Page(base app.Config) (*ui.Page, app.Config) {
 	theme, follow := a.themeConfig()
 	page := ui.NewPage(ui.PageConfig{View: a.page, Theme: theme, FollowSystemTheme: follow})
@@ -300,35 +274,20 @@ func (a *App) Page(base app.Config) (*ui.Page, app.Config) {
 	return page, config
 }
 
-// pageConfig is the config the page was built with; a test uses Page.
 func (a *App) invalidate() {
 	if inv := a.inv.Load(); inv != nil {
 		inv.Invalidate()
 	}
 }
 
-// SetInvalidator is how Run hands the window's waker to the application.
+// SetInvalidator hands the window's waker to the application.
 func (a *App) SetInvalidator(inv *app.Invalidator) { a.inv.Store(inv) }
 
-// themeConfig is the page's theme configuration: an explicit theme the user
-// chose, or none at all with the system appearance followed, which is what
-// "自适应皮肤" means.
-//
-// The page is given &a.theme, a field of the model, not a local: a theme built on
-// the stack lives only as long as the call that built it, and a setting changed
-// later would change the file while the window kept painting the old theme.
 func (a *App) themeConfig() (*gfx.Theme, bool) {
 	a.applyTheme()
 	return &a.theme, false
 }
 
-// applyTheme recomputes the theme the window paints from the setting. It is
-// called when the page is built and again whenever the setting changes.
-//
-// "system" is resolved here rather than left to the page's FollowSystemTheme,
-// because the application paints with colors of its own: a theme the framework
-// picks by itself would lose them. The watch below moves the same field when the
-// desktop switches.
 func (a *App) applyTheme() {
 	dark := false
 	switch a.config.Theme {
@@ -346,9 +305,6 @@ func (a *App) applyTheme() {
 	a.theme = a.decorate(gfx.LightTheme(), false)
 }
 
-// watchAppearance repaints in the other theme when the desktop switches, while
-// the setting says to follow it. It runs only under "system": a fixed theme is
-// the user's answer, and a switch must not override it.
 func (a *App) watchAppearance() {
 	a.stopAppearance = app.WatchSystemAppearance(func() {
 		if a.config.Theme != "system" && a.config.Theme != "" {
@@ -359,14 +315,6 @@ func (a *App) watchAppearance() {
 	})
 }
 
-// The application's own palette, taken from the icon: the whale is drawn in
-// three blues on near-black, and the window uses the same water.
-//
-//	cyan   #18D8F0  the whale's rim light
-//	blue   #0090F0  its body
-//	deep   #0048A8  the note
-//	abyss  #0B1A26  the sea at night
-//	foam   #F2F9FF  the light on the surface
 const (
 	colorCyan  = 0x18D8F0
 	colorBlue  = 0x0090F0
@@ -376,14 +324,6 @@ const (
 	colorShore = 0x06243B
 )
 
-// decorate returns the theme with the application's own colors. Only the tokens
-// that carry the brand change; the neutrals stay the framework's, so contrast,
-// the control recipes and the dark/light switch keep working.
-//
-// The dark appearance is the sea at night: a deep blue-black, cyan accents, and
-// text that keeps its contrast. The light one is the same water under a bright
-// sky: white and pale blue surfaces, the deep blue carrying the accent so it
-// stays readable on white.
 func (a *App) decorate(theme gfx.Theme, dark bool) gfx.Theme {
 	if dark {
 		theme.Background = gfx.RGB24(0x07131C)
@@ -437,17 +377,13 @@ func (a *App) decorate(theme gfx.Theme, dark bool) gfx.Theme {
 	return theme
 }
 
-// sync runs the closures workers published. The page calls it before declaring
-// anything, and a test calls it while waiting for data.
 func (a *App) sync() { a.work.drain() }
 
 // ----- background work -----
 
-// workQueue hands closures from workers to the window thread.
 type workQueue struct {
-	mu      sync.Mutex
-	items   []func()
-	pending int
+	mu    sync.Mutex
+	items []func()
 }
 
 func newWorkQueue() *workQueue { return &workQueue{} }
@@ -458,15 +394,12 @@ func (w *workQueue) push(fn func()) {
 	w.mu.Unlock()
 }
 
-// quiet reports whether no closure is waiting.
 func (w *workQueue) quiet() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return len(w.items) == 0
 }
 
-// drain takes the published closures and runs them on the calling (window)
-// thread.
 func (w *workQueue) drain() {
 	w.mu.Lock()
 	items := w.items
@@ -477,8 +410,6 @@ func (w *workQueue) drain() {
 	}
 }
 
-// background runs fn off the window thread and publishes its result for the
-// window thread through apply. A panic in fn becomes an error result.
 func (a *App) background(fn func() error, done func(error)) {
 	go func() {
 		err := fn()
@@ -491,21 +422,16 @@ func (a *App) background(fn func() error, done func(error)) {
 	}()
 }
 
-// notifyLater shows a toast on the next paint, from any goroutine.
 func (a *App) notifyLater(title, body string) {
 	a.work.push(func() { a.toast(title, body, ui.ToastDefault) })
 }
 
-// toast shows a message in the window's corner. It asks for the repaint itself:
-// the Toaster only queues a toast, and a caller that showed one from a key
-// handler or a worker may not be followed by a paint for any other reason.
 func (a *App) toast(title, body string, kind ui.ToastKind) {
 	a.toaster.Show(title, body, kind)
 	a.toastSeq++
 	a.invalidate()
 }
 
-// errText is what a failed request says to a user.
 func errText(err error) string {
 	if err == nil {
 		return ""
@@ -536,7 +462,6 @@ func errText(err error) string {
 
 // ----- navigation -----
 
-// top is the page on screen.
 func (a *App) top() route {
 	if len(a.nav) == 0 {
 		return route{kind: routeDiscover, title: "发现"}
@@ -544,7 +469,6 @@ func (a *App) top() route {
 	return a.nav[len(a.nav)-1]
 }
 
-// push opens a page, replacing the top one when it is the same page.
 func (a *App) push(r route) {
 	if len(a.nav) > 0 {
 		if current := a.nav[len(a.nav)-1]; current.kind == r.kind && current.id == r.id && r.kind != routeSearch {
@@ -556,7 +480,6 @@ func (a *App) push(r route) {
 	a.invalidate()
 }
 
-// pop goes back one page, keeping the first.
 func (a *App) pop() {
 	if len(a.nav) > 1 {
 		a.nav = a.nav[:len(a.nav)-1]
@@ -564,15 +487,6 @@ func (a *App) pop() {
 	}
 }
 
-// home returns to the first page.
-func (a *App) home() {
-	if len(a.nav) > 1 {
-		a.nav = a.nav[:1]
-		a.invalidate()
-	}
-}
-
-// section switches between the top-level pages, clearing the stack.
 func (a *App) section(kind routeKind) {
 	titles := map[routeKind]string{
 		routeDiscover: "发现",
@@ -586,10 +500,8 @@ func (a *App) section(kind routeKind) {
 	a.invalidate()
 }
 
-// persistSession writes the cookies the client holds now. It is called after a
-// login, after a session was refreshed, and on the way out: whatever the server
-// set during the run is what the next start needs, and a run that never wrote it
-// back would ask for the QR code again.
+// ----- session -----
+
 func (a *App) persistSession() {
 	if a.user.UserID == 0 {
 		return
@@ -597,9 +509,6 @@ func (a *App) persistSession() {
 	_ = a.sessions.Save(storeSessionFrom(a.client, a.user))
 }
 
-// refreshSession asks the server whether the saved login still works. A session
-// the server no longer accepts is cleared and the window says so, rather than
-// showing an account whose every request will be refused.
 func (a *App) refreshSession() {
 	if a.user.UserID == 0 {
 		return
@@ -611,18 +520,15 @@ func (a *App) refreshSession() {
 		a.work.push(func() {
 			switch {
 			case err == nil:
-				a.user = user
-				// The answer may carry refreshed cookies: keep them.
+				a.setUser(user)
 				a.persistSession()
 			case errors.Is(err, ncm.ErrNotLoggedIn):
-				a.user = ncm.UserInfo{}
+				a.setUser(ncm.UserInfo{})
 				a.likedSet = make(map[int64]bool)
 				a.data.mine = mineData{}
 				_ = a.sessions.Clear()
 				a.toast("登录已失效", "请重新扫码登录", ui.ToastWarning)
 				a.loadDiscover()
-			default:
-				// A network failure says nothing about the login: keep it.
 			}
 		})
 		a.invalidate()

@@ -214,8 +214,8 @@ func (a *App) songRow(c ui.C, list songList, index int) {
 				}
 				// A cached song plays offline, and that is worth saying: it is
 				// the client's own feature.
-				if a.cached.has(song.ID) {
-					badge(c, "已缓存", theme.Success)
+				if q, ok := a.cached.BestQuality(song.ID); ok {
+					badge(c, "已缓存 · "+q.String(), theme.Success)
 				}
 			})
 			ui.Text(c, song.Singer()).FontSize(11).Muted().Ellipsis()
@@ -239,9 +239,19 @@ func (a *App) songRow(c ui.C, list songList, index int) {
 			if list.onMore != nil {
 				more := ui.Button(c, "").Icon(iconQueue).IconOnly().XSmall().Ghost().Tooltip("更多")
 				more.Label("更多操作")
-				ui.Menu(c, more, &a.rowMenuOpen, func(menu *ui.MenuItems) {
-					a.rowMenu(menu, list, index)
-				})
+				if more.Clicked() {
+					if a.rowMenuOpen && a.rowMenuSongID == song.ID {
+						a.rowMenuOpen = false
+					} else {
+						a.rowMenuSongID = song.ID
+						a.rowMenuOpen = true
+					}
+				}
+				if a.rowMenuOpen && a.rowMenuSongID == song.ID {
+					ui.Menu(c, more, &a.rowMenuOpen, func(menu *ui.MenuItems) {
+						a.rowMenu(menu, list, index)
+					})
+				}
 			}
 		})
 	})
@@ -291,8 +301,8 @@ func (a *App) rowMenu(menu *ui.MenuItems, list songList, index int) {
 		a.like(song)
 	}
 	menu.Separator()
-	if path, quality, ok := a.cache.Lookup(song.ID, a.config.PreferredQuality()); ok {
-		if menu.Item("导出缓存文件").Clicked() {
+	if path, quality, ok := a.cache.LookupBest(song.ID); ok {
+		if menu.Item("导出缓存文件").Description(quality.String()).Clicked() {
 			a.exportCached(song, path, quality)
 		}
 	}
@@ -318,8 +328,6 @@ func (a *App) playNextInQueue(song ncm.Song) {
 
 // playlistCard is one tile of the discover grid: cover, name, play count.
 func (a *App) playlistCard(c ui.C, playlist ncm.Playlist, width float32) {
-	theme := c.Theme()
-	_ = theme
 	ui.Column(c).Width(width).Gap(6).Children(func() {
 		cover := a.coverBox(c, ncm.CoverURL(playlist.CoverImgURL, 300), playlist.Name, width)
 		cover.Hit(ui.ID(c), playlist.Name)

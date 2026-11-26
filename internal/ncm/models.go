@@ -127,6 +127,11 @@ func QualityFromLevel(level string) (Quality, bool) {
 // qualityFromBitrate guesses a tier from a bit rate, for responses that carry
 // no level.
 func qualityFromBitrate(rate int) Quality {
+	// Surround's GTK cache bitrate (804505) sits numerically below Lossless's
+	// nominal 999000, so match it explicitly before range checks.
+	if rate == QualitySurround.Bitrate() {
+		return QualitySurround
+	}
 	switch {
 	case rate <= 128000:
 		return QualityStandard
@@ -221,8 +226,10 @@ type Song struct {
 	// bare Selected cannot tell "the user chose 标准" from "the user chose nothing".
 	Selected    Quality
 	SelectedSet bool
-	// Actual is the tier the server answered with.
-	Actual Quality
+	// Actual is the tier currently playing (from server or local cache), and
+	// ActualSet distinguishes QualityStandard (0) from "not yet played".
+	Actual    Quality
+	ActualSet bool
 	// URL is the stream URL of the last resolve, empty when unresolved.
 	URL string
 	// Privilege is the raw privilege code block, kept for the like button and

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,10 +16,22 @@ import (
 	"cetone/internal/store"
 )
 
-// Playback. The rule that makes this client's offline library work: a cached
-// file is played before the API is asked for a URL, so a song whose VIP rights
-// lapsed still plays from the disk, and a song the account may stream is stored
-// the first time it plays.
+// Playback and highest-quality caching policy:
+//
+//  1. Default playback aims for the highest quality available to the account
+//     (asking the API for QualityMaster, which the server downgrades to the
+//     song/account ceiling). Once that highest tier is cached and recorded in
+//     library.json for the current VIP level, subsequent plays open the local
+//     file immediately with zero network requests — even after VIP expires or
+//     when offline.
+//  2. If the user switches quality during playback from the player bar badge,
+//     playback resumes seamlessly at the current position in the chosen tier
+//     without overwriting or downgrading the highest-quality cache. If the song
+//     is not yet cached at its highest tier while online, a background upgrade
+//     still fetches and caches the highest tier.
+//  3. Every song switch cancels any in-flight URL resolution via playGen +
+//     context cancellation and calls engine.Prepare immediately so the previous
+//     track stops at once and the progress bar resets cleanly.
 
 // playQueue replaces the queue and starts at index.
 func (a *App) playQueue(songs []ncm.Song, index int) {
@@ -33,89 +46,211 @@ func (a *App) playQueue(songs []ncm.Song, index int) {
 	a.playAt(index)
 }
 
-// playAt starts the song at index in the queue.
+// playAt starts the song at index from its beginning.
 func (a *App) playAt(index int) {
-	if index < 0 || index >= len(a.queue) {
-		return
-	}
-	a.queueAt = index
-	song := a.queue[index]
-	a.persistQueue()
-	a.followPlayingSong(song)
-	go a.resolveAndPlay(song)
+	a.playAtResuming(index, 0)
 }
 
-// playAtResuming starts the song at index and continues from the position a
-// previous run stopped at, which is what pressing play on a restored queue does.
+// playAtResuming starts the song at index directly at position at (used for
+// quality switching and restored queues).
 func (a *App) playAtResuming(index int, at time.Duration) {
 	if index < 0 || index >= len(a.queue) {
 		return
 	}
+	if at < 0 {
+		at = 0
+	}
 	a.queueAt = index
 	song := a.queue[index]
+
+	gen, ctx := a.nextPlaySlot()
+
+	// Reset slider & engine immediately so old audio stops at once and the
+	// progress bar never displays the previous track's time or duration.
+	a.seekPending = false
+	a.seekTarget = at
+	a.seekDrag.Value = progressPercent(at, song.Duration)
+	a.qualityMenuOpen = false
+	a.engine.Prepare(song.ID, song.Name, song.Duration, at)
+
+	a.persistQueueAt(at)
 	a.followPlayingSong(song)
-	position := at
-	go func() {
-		a.resolveAndPlayAt(song, position)
-	}()
+	a.updateMPRIS()
+	a.updateTray()
+	a.invalidate()
+
+	go a.resolveAndPlayGen(ctx, gen, song, at)
 }
 
-// resolveAndPlay plays a song from its beginning.
+// nextPlaySlot increments the playback generation and cancels any previous
+// in-flight resolution.
+func (a *App) nextPlaySlot() (uint64, context.Context) {
+	gen := a.playGen.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.playCancelMu.Lock()
+	prev := a.playCancel
+	a.playCancel = cancel
+	a.playCancelMu.Unlock()
+	if prev != nil {
+		prev()
+	}
+	return gen, ctx
+}
+
+func (a *App) cancelPendingPlay() {
+	a.playGen.Add(1)
+	a.playCancelMu.Lock()
+	prev := a.playCancel
+	a.playCancel = nil
+	a.playCancelMu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
+// resolveAndPlay resolves and plays song from 0 (kept for direct test callers).
 func (a *App) resolveAndPlay(song ncm.Song) { a.resolveAndPlayAt(song, 0) }
 
-// resolveAndPlayAt turns a song into a source and starts the engine. The engine
-// is safe from any goroutine, so the whole resolution runs on a worker; only the
-// model updates go through the work queue.
-//
-// The order is the feature: a cached file is tried first and it is not a
-// question of what the account may stream any more. A cached file that will not
-// decode (an interrupted download from an older client, a disk error) falls
-// back to the network rather than stopping the queue, and the file is left where
-// it is: it is the user's.
+// resolveAndPlayAt resolves and plays song at position at (kept for direct test
+// callers).
 func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
-	quality := a.songQuality(song)
-	volume, muted := a.config.Volume, a.config.Muted
-	cachePath, cachedQuality, hasCache := a.cache.Lookup(song.ID, quality)
+	gen, ctx := a.nextPlaySlot()
+	a.resolveAndPlayGen(ctx, gen, song, at)
+}
 
-	// A cached file at the tier being asked for is the same audio as a download
-	// would fetch, so it plays without a request.
-	if hasCache && cachedQuality >= quality {
-		if a.playCached(song, cachePath, cachedQuality, at, volume, muted) {
+func (a *App) resolveAndPlayGen(ctx context.Context, gen uint64, song ncm.Song, at time.Duration) {
+	stale := func() bool {
+		return a.playGen.Load() != gen || ctx.Err() != nil
+	}
+	if stale() {
+		return
+	}
+
+	volume, muted := a.engine.Volume(), a.engine.Muted()
+	vipType := a.currentVIP()
+
+	if song.SelectedSet {
+		a.resolveSelectedQuality(ctx, gen, song, at, volume, muted, vipType)
+		return
+	}
+	a.resolveBestQuality(ctx, gen, song, at, volume, muted, vipType)
+}
+
+// resolveSelectedQuality plays an explicit user-chosen tier for song, using an
+// exact cached file if present and otherwise streaming that tier without
+// downgrading the highest-quality local cache.
+func (a *App) resolveSelectedQuality(ctx context.Context, gen uint64, song ncm.Song, at time.Duration, volume float64, muted bool, vipType int) {
+	stale := func() bool { return a.playGen.Load() != gen || ctx.Err() != nil }
+	want := song.Selected
+
+	// 1. Exact tier already cached locally: play immediately with no network.
+	if exactPath, ok := a.cache.LookupExact(song.ID, want); ok {
+		if a.playCachedGen(gen, song, exactPath, want, at, volume, muted) {
+			a.ensureHighestCachedAsync(song, vipType)
 			return
 		}
-		// The file is there but not decodable: ask the network, and say why.
+		a.notifyCachedBroken(song)
+	}
+
+	// 2. Ask the API for the chosen tier.
+	resolved, usable, err := a.fetchSongURL(ctx, song.ID, want)
+	if stale() {
+		return
+	}
+
+	if usable && !resolved.FreeTrial {
+		cacheable := cacheableStream(song, resolved) && a.shouldCacheResolved(song, resolved.Quality)
+		if err := a.playStreamGen(gen, song, resolved, cacheable, at, volume, muted); err == nil {
+			// Record best if this tier is higher than anything seen so far.
+			a.noteBestTierForVIP(song, resolved.Quality, vipType)
+			// Even if the user picked a lower tier for playback, keep building
+			// the highest-quality VIP offline library in the background.
+			a.ensureHighestCachedAsync(song, vipType)
+			return
+		}
+		return
+	}
+
+	// 3. Offline / VIP expired / server refused: fall back to the highest cached
+	// file on disk rather than stopping playback.
+	if bestPath, bestCached, ok := a.cache.LookupBest(song.ID); ok {
+		if a.playCachedGen(gen, song, bestPath, bestCached, at, volume, muted) {
+			a.work.push(func() {
+				a.toast("已使用本地缓存", fmt.Sprintf("%s：无法获取 %s，已切换至本地 %s", song.Name, want.String(), bestCached.String()), ui.ToastDefault)
+			})
+			a.invalidate()
+			return
+		}
+	}
+
+	// 4. Only a free trial preview is available and nothing is cached.
+	if usable && resolved.FreeTrial {
+		_ = a.playStreamGen(gen, song, resolved, false, at, volume, muted)
+		return
+	}
+
+	if stale() {
+		return
+	}
+	reason := firstNonEmpty(errText(err), "无法切换到所选音质（可能网络或权限限制）")
+	a.work.push(func() {
+		a.toast("切换音质失败", song.Name+"："+reason, ui.ToastError)
+	})
+	a.invalidate()
+}
+
+// resolveBestQuality implements the core VIP highest-quality cache-first flow:
+//   - If the highest tier for the current VIP level is already cached, play
+//     immediately from disk with zero network requests.
+//   - Otherwise ask the server for QualityMaster; stream & cache if a higher
+//     tier is available, or fall back to the best local file when offline,
+//     when VIP has lapsed (FreeTrial), or when the server cannot beat disk.
+func (a *App) resolveBestQuality(ctx context.Context, gen uint64, song ncm.Song, at time.Duration, volume float64, muted bool, vipType int) {
+	stale := func() bool { return a.playGen.Load() != gen || ctx.Err() != nil }
+
+	bestPath, bestCached, hasCache := a.cache.LookupBest(song.ID)
+
+	// Fast path: disk already holds the known highest tier for this account
+	// (including after VIP has expired, since currentVIP <= ProbedVIP).
+	if hasCache && a.cacheIsAlreadyBest(song.ID, bestCached, vipType) {
+		if a.playCachedGen(gen, song, bestPath, bestCached, at, volume, muted) {
+			return
+		}
 		hasCache = false
-		defer func() { a.notifyCachedBroken(song) }()
+		a.notifyCachedBroken(song)
 	}
 
-	// The request has its own deadline; the playback session must not: it outlives
-	// this function, and cancelling it here would end the download mid-song, which
-	// the decoder would read as the end of the track.
-	requestCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	resolve := a.resolveURL
-	if resolve == nil {
-		resolve = a.client.SongURLs
+	// Probe the server for the absolute highest tier available.
+	resolved, usable, err := a.fetchSongURL(ctx, song.ID, ncm.QualityMaster)
+	if stale() {
+		return
 	}
-	urls, err := resolve(requestCtx, []int64{song.ID}, quality)
-	usable := err == nil && len(urls) > 0 && urls[0].URL != ""
 
-	// A lower tier than the one asked for is still worth playing when the network
-	// has nothing better. That is the case the cache exists for — a VIP that ran
-	// out, or no connection — and it is why a cached file is kept when the
-	// download cannot be made.
-	if hasCache && (!usable || urls[0].FreeTrial || urls[0].Quality <= cachedQuality) {
-		if a.playCached(song, cachePath, cachedQuality, at, volume, muted) {
+	// If offline, VIP expired (FreeTrial), or server has nothing better than
+	// what is already on disk, play the cached file.
+	if hasCache && (!usable || resolved.FreeTrial || resolved.Quality <= bestCached) {
+		if usable && !resolved.FreeTrial && resolved.Quality <= bestCached {
+			// Server confirmed disk already holds the ceiling for this VIP level;
+			// persist that knowledge so future plays skip the network completely.
+			a.recordCachedAsBest(song.ID, bestPath, bestCached, vipType)
+		}
+		if a.playCachedGen(gen, song, bestPath, bestCached, at, volume, muted) {
 			return
 		}
+		// Cached file turned out corrupt; fall through to stream if usable.
+		a.notifyCachedBroken(song)
 	}
 
 	if !usable {
+		if stale() {
+			return
+		}
 		reason := firstNonEmpty(errText(err), "该歌曲当前不可播放（可能版权或会员限制）")
 		a.work.push(func() {
+			if a.playGen.Load() != gen {
+				return
+			}
 			a.toast("无法播放", song.Name+"："+reason, ui.ToastError)
-			// Skip to the next song rather than stopping the queue on one
-			// unplayable track.
 			if len(a.queue) > 1 {
 				a.advance(1, true)
 			}
@@ -124,39 +259,63 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		return
 	}
 
-	resolved := urls[0]
+	if !resolved.FreeTrial {
+		a.noteBestTierForVIP(song, resolved.Quality, vipType)
+	}
+	cacheable := cacheableStream(song, resolved) && a.isBestTier(song, resolved.Quality)
+	_ = a.playStreamGen(gen, song, resolved, cacheable, at, volume, muted)
+}
+
+func (a *App) fetchSongURL(ctx context.Context, songID int64, quality ncm.Quality) (ncm.SongURL, bool, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	resolve := a.resolveURL
+	if resolve == nil {
+		resolve = a.client.SongURLs
+	}
+	urls, err := resolve(reqCtx, []int64{songID}, quality)
+	if err != nil || len(urls) == 0 || urls[0].URL == "" {
+		return ncm.SongURL{}, false, err
+	}
+	return urls[0], true, nil
+}
+
+func (a *App) playStreamGen(gen uint64, song ncm.Song, resolved ncm.SongURL, cacheable bool, at time.Duration, volume float64, muted bool) error {
+	if a.playGen.Load() != gen {
+		return context.Canceled
+	}
 	a.engine.SetVolume(volume)
 	a.engine.SetMuted(muted)
 	source := player.Source{
+		SongID:   song.ID,
 		Title:    song.Name,
 		Stream:   resolved.URL,
 		Duration: song.Duration,
 		Header:   http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
 	}
-	// A trial fragment is not the song. Writing one to the cache would put a
-	// thirty-second clip where the full track belongs, and every later play would
-	// come from it, so it plays and is not kept.
-	// Only the best tier is kept: a file at a lower tier would be what plays after
-	// the subscription ends, and it would never be the one worth having. A tier the
-	// user picked for this play is therefore played and not stored.
-	cacheable := cacheableStream(song, resolved) && a.isBestTier(song, resolved.Quality)
 	if cacheable {
 		source.CachePath = a.cache.Path(song.ID, resolved.Quality)
 	}
-	// The session's context is the engine's own: Close and a replacement cancel
-	// it, and nothing else does.
-	if err := a.engine.Play(context.Background(), source); err != nil {
+	if err := a.engine.PlayAt(context.Background(), source, at); err != nil {
+		if a.playGen.Load() != gen {
+			return err
+		}
 		message := errText(err)
-		a.work.push(func() { a.toast("无法播放", message, ui.ToastError) })
+		a.work.push(func() {
+			if a.playGen.Load() != gen {
+				return
+			}
+			a.toast("无法播放", message, ui.ToastError)
+		})
 		a.invalidate()
-		return
-	}
-	if at > 0 {
-		a.engine.Seek(at)
+		return err
 	}
 	a.work.push(func() {
+		if a.playGen.Load() != gen {
+			return
+		}
 		a.playing = true
-		if !cacheable {
+		if resolved.FreeTrial {
 			a.toast("仅可试听", song.Name+"：当前账户只能播放试听片段，未写入缓存", ui.ToastWarning)
 		}
 		a.noteCachedQuality(song.ID, resolved.Quality)
@@ -164,25 +323,28 @@ func (a *App) resolveAndPlayAt(song ncm.Song, at time.Duration) {
 		a.updateTray()
 	})
 	a.invalidate()
+	return nil
 }
 
-// playCached starts the song from the file on disk. It reports whether the file
-// played, so the caller can fall back to the network when it does not.
-func (a *App) playCached(song ncm.Song, path string, quality ncm.Quality, at time.Duration, volume float64, muted bool) bool {
+func (a *App) playCachedGen(gen uint64, song ncm.Song, path string, quality ncm.Quality, at time.Duration, volume float64, muted bool) bool {
+	if a.playGen.Load() != gen {
+		return true
+	}
 	a.engine.SetVolume(volume)
 	a.engine.SetMuted(muted)
-	err := a.engine.Play(context.Background(), player.Source{
+	err := a.engine.PlayAt(context.Background(), player.Source{
+		SongID:   song.ID,
 		Title:    song.Name,
 		File:     path,
 		Duration: song.Duration,
-	})
+	}, at)
 	if err != nil {
 		return false
 	}
-	if at > 0 {
-		a.engine.Seek(at)
-	}
 	a.work.push(func() {
+		if a.playGen.Load() != gen {
+			return
+		}
 		a.playing = true
 		a.noteCachedQuality(song.ID, quality)
 		a.updateMPRIS()
@@ -192,8 +354,6 @@ func (a *App) playCached(song ncm.Song, path string, quality ncm.Quality, at tim
 	return true
 }
 
-// notifyCachedBroken says once that a cache file could not be decoded. It is a
-// warning rather than an error: the song still plays, from the network.
 func (a *App) notifyCachedBroken(song ncm.Song) {
 	a.work.push(func() {
 		a.toast("缓存文件已损坏", song.Name+"：改为在线播放", ui.ToastWarning)
@@ -201,25 +361,15 @@ func (a *App) notifyCachedBroken(song ncm.Song) {
 	a.invalidate()
 }
 
-// cacheableStream reports whether the bytes behind a resolved URL are the whole
-// song rather than a trial fragment.
-//
-// The API answers a song the account may not stream with a short preview and
-// FreeTrial set; it can also answer a full URL whose size is far below what the
-// duration implies (a truncated answer). Either one written to the cache would
-// replace the song on disk with a clip, which is worse than not caching at all:
-// the client would then play the clip forever and call it the offline copy.
+// cacheableStream reports whether the resolved stream is a full track rather
+// than a 30-second VIP preview or truncated response.
 func cacheableStream(song ncm.Song, resolved ncm.SongURL) bool {
 	if resolved.FreeTrial {
 		return false
 	}
-	// The GTK client's own rule: a VIP preview runs about thirty seconds, and a
-	// song shorter than that is not worth a cache entry anyway.
 	if song.Duration < 30*time.Second {
 		return false
 	}
-	// A size far below the shortest plausible bit rate for the length is a
-	// fragment, whatever the flags say: 64 kb/s is the floor this client trusts.
 	if resolved.Size > 0 {
 		minimum := int64(song.Duration.Seconds() * 64_000 / 8)
 		if resolved.Size < minimum/2 {
@@ -229,28 +379,8 @@ func cacheableStream(song ncm.Song, resolved ncm.SongURL) bool {
 	return true
 }
 
-// songQuality is the tier to ask for: the one picked for this song, else the
-// setting.
-//
-// The setting is what the user asked for, not a floor under it. It is the only
-// thing that decides how much bandwidth a song costs — 320 kb/s is 5.7 MB and
-// Hi-Res is 34 MB for the same three minutes — so raising it on the user's
-// behalf would spend their disk on a choice they did not make. Asking for more
-// than the account may play is harmless: the server answers the best level it
-// will give and the answer says which, so a wrong setting costs a request and
-// never a failure.
-//
-// The account's own ceiling (Privilege.Level) is deliberately not used to cap
-// this: it reports "hires" for an account that the server happily serves
-// "jyeffect" for, so capping by it would hide a tier the account can play.
-// songQuality is the tier to ask for.
-//
-// A tier the user picked for this song wins. Otherwise the client asks for the
-// best one it can name and lets the server answer with what the account may
-// stream: the answer says which level it gave, so asking for more than the plan
-// holds costs a request and never a failure. That is why there is no account-wide
-// quality setting — the best tier is a property of the song and the account, not
-// a preference the user has to guess.
+// songQuality is the tier to request: the per-song pick if set, otherwise
+// QualityMaster so the server answers with the highest tier available.
 func (a *App) songQuality(song ncm.Song) ncm.Quality {
 	if song.SelectedSet {
 		return song.Selected
@@ -258,26 +388,317 @@ func (a *App) songQuality(song ncm.Song) ncm.Quality {
 	return ncm.QualityMaster
 }
 
-// noteCachedQuality records the tier a song played at, so the list can show
-// what the file on disk is.
+// isBestTier reports whether played qualifies as the highest tier worth caching.
+func (a *App) isBestTier(song ncm.Song, played ncm.Quality) bool {
+	if !song.SelectedSet {
+		return true
+	}
+	return played >= song.Selected
+}
+
+// shouldCacheResolved decides whether a stream opened under an explicit quality
+// pick should be written to cache: yes if it matches or beats the known ceiling
+// and nothing better is already on disk, no if the user intentionally stepped
+// down to a lower tier.
+func (a *App) shouldCacheResolved(song ncm.Song, played ncm.Quality) bool {
+	if !a.isBestTier(song, played) {
+		return false
+	}
+	if _, bestCached, ok := a.cache.LookupBest(song.ID); ok && bestCached >= played {
+		return false
+	}
+	if a.library != nil {
+		if entry, ok := a.library.Get(song.ID); ok && entry.Best > played {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) cacheIsAlreadyBest(songID int64, cachedQuality ncm.Quality, vipType int) bool {
+	if cachedQuality >= ncm.QualityMaster {
+		return true
+	}
+	if a.library == nil {
+		return false
+	}
+	return a.library.IsBestCached(songID, cachedQuality, vipType)
+}
+
+func (a *App) recordCachedAsBest(songID int64, path string, quality ncm.Quality, vipType int) {
+	if a.library == nil {
+		return
+	}
+	var size int64
+	if info, err := os.Stat(path); err == nil {
+		size = info.Size()
+	}
+	_ = a.library.Put(store.CacheEntry{
+		SongID:    songID,
+		Quality:   quality,
+		File:      filepath.Base(path),
+		Size:      size,
+		SavedAt:   time.Now(),
+		Best:      quality,
+		ProbedVIP: vipType,
+	})
+}
+
+// noteCachedQuality updates the playing tier shown in the transport bar.
 func (a *App) noteCachedQuality(songID int64, quality ncm.Quality) {
 	for i := range a.queue {
 		if a.queue[i].ID != songID {
 			continue
 		}
 		a.queue[i].Actual = quality
+		a.queue[i].ActualSet = true
 		if !a.queue[i].SelectedSet {
-			// Show the tier the server answered with, without making it a choice:
-			// the next play asks for the best again.
 			a.queue[i].Selected = quality
 		}
 	}
 }
 
-// userAgentHeader is what the music CDN expects of a player.
+// playingQuality returns the display name of the currently playing tier.
+func (a *App) playingQuality(song ncm.Song) string {
+	if a.queueAt < 0 || a.queueAt >= len(a.queue) || a.queue[a.queueAt].ID != song.ID {
+		return ""
+	}
+	cur := a.queue[a.queueAt]
+	if cur.ActualSet {
+		return cur.Actual.String()
+	}
+	return ""
+}
+
+// bestQualityFor returns the highest tier known to be reachable for song,
+// preserving the ceiling even when the user temporarily switches to a lower tier.
+// Until the song has been probed at the current VIP tier, all tiers up to
+// QualityMaster are offered so a VIP user is never locked into an older low-tier
+// cache file.
+func (a *App) bestQualityFor(song ncm.Song) ncm.Quality {
+	vipType := a.currentVIP()
+	best := ncm.QualityStandard
+	haveCeiling := false
+	if a.library != nil {
+		if entry, ok := a.library.Get(song.ID); ok && entry.ProbedVIP >= vipType && (entry.File != "" || entry.Best > 0 || entry.ProbedVIP > 0) {
+			best = entry.Best
+			haveCeiling = true
+		}
+	}
+	if !haveCeiling {
+		return ncm.QualityMaster
+	}
+	if cached, ok := a.cached.BestQuality(song.ID); ok && cached > best {
+		best = cached
+	}
+	if song.ActualSet && song.Actual > best {
+		best = song.Actual
+	}
+	return best
+}
+
+// chooseQuality switches the current song to quality at the current position.
+func (a *App) chooseQuality(song ncm.Song, quality ncm.Quality) {
+	for i := range a.queue {
+		if a.queue[i].ID != song.ID {
+			continue
+		}
+		a.queue[i].Selected = quality
+		a.queue[i].SelectedSet = true
+	}
+	at := a.currentPlaybackPosition()
+	if index := a.queueAtOf(song.ID); index >= 0 {
+		a.playAtResuming(index, at)
+	}
+}
+
+// chooseAutoQuality clears any per-song quality override and switches back to
+// automatic highest-quality playback at the current position.
+func (a *App) chooseAutoQuality(song ncm.Song) {
+	for i := range a.queue {
+		if a.queue[i].ID != song.ID {
+			continue
+		}
+		a.queue[i].SelectedSet = false
+	}
+	at := a.currentPlaybackPosition()
+	if index := a.queueAtOf(song.ID); index >= 0 {
+		a.playAtResuming(index, at)
+	}
+}
+
+func (a *App) currentPlaybackPosition() time.Duration {
+	if a.seekPending {
+		return a.seekTarget
+	}
+	return a.engine.Snapshot().Position
+}
+
+func (a *App) queueAtOf(id int64) int {
+	for i := range a.queue {
+		if a.queue[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// fileWasCached records a newly promoted cache file in library.json.
+func (a *App) fileWasCached(path string) {
+	if a.library == nil || path == "" {
+		return
+	}
+	songID, quality, ok := store.ParseName(filepath.Base(path))
+	if !ok {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	vipType := a.currentVIP()
+	// Never downgrade the recorded primary file quality if a better file exists.
+	if prev, exists := a.library.Get(songID); exists && prev.File != "" && prev.Quality > quality {
+		a.cached.SetDirty()
+		return
+	}
+	entry := store.CacheEntry{
+		SongID:    songID,
+		Quality:   quality,
+		File:      filepath.Base(path),
+		Size:      info.Size(),
+		SavedAt:   time.Now(),
+		Best:      quality,
+		ProbedVIP: vipType,
+	}
+	_ = a.library.Put(entry)
+	a.work.push(func() {
+		a.cached.SetDirty()
+		song := ncm.Song{ID: songID, Name: entry.File}
+		for i := range a.queue {
+			if a.queue[i].ID == songID {
+				song = a.queue[i]
+				break
+			}
+		}
+		a.upgradeCache(song, quality)
+		a.invalidate()
+	})
+}
+
+func (a *App) noteBestTier(song ncm.Song, played ncm.Quality) {
+	a.noteBestTierForVIP(song, played, a.currentVIP())
+}
+
+func (a *App) noteBestTierForVIP(song ncm.Song, played ncm.Quality, vipType int) {
+	if a.library == nil {
+		return
+	}
+	_ = a.library.NoteBestForVIP(song.ID, played, vipType)
+}
+
+// ensureHighestCachedAsync guarantees that when the user plays a song at a
+// lower quality while online (for example, after manually selecting 极高 or
+// playing an older 128k cache file), the highest available VIP tier is still
+// fetched and cached in the background.
+func (a *App) ensureHighestCachedAsync(song ncm.Song, vipType int) {
+	if a.library == nil || a.noRemote {
+		return
+	}
+	_, bestCached, hasCache := a.cache.LookupBest(song.ID)
+	if hasCache && a.cacheIsAlreadyBest(song.ID, bestCached, vipType) {
+		return
+	}
+	a.startUpgradeDownload(song, ncm.QualityMaster, bestCached, hasCache, vipType)
+}
+
+// upgradeCache fetches a known higher tier in the background when disk holds a
+// lower tier.
+func (a *App) upgradeCache(song ncm.Song, have ncm.Quality) {
+	if a.library == nil {
+		return
+	}
+	best, wanted := a.library.WantsBetter(song.ID)
+	if !wanted {
+		return
+	}
+	a.startUpgradeDownload(song, best, have, true, a.currentVIP())
+}
+
+func (a *App) startUpgradeDownload(song ncm.Song, askQuality, currentCached ncm.Quality, hasCached bool, vipType int) {
+	a.upgradeMu.Lock()
+	if a.upgrading[song.ID] {
+		a.upgradeMu.Unlock()
+		return
+	}
+	a.upgrading[song.ID] = true
+	a.upgradeMu.Unlock()
+
+	resolve := a.resolveURL
+	if resolve == nil {
+		resolve = a.client.SongURLs
+	}
+	httpClient := a.client.HTTPClient()
+	go func() {
+		defer func() {
+			a.upgradeMu.Lock()
+			delete(a.upgrading, song.ID)
+			a.upgradeMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		urls, err := resolve(ctx, []int64{song.ID}, askQuality)
+		if err != nil || len(urls) == 0 || urls[0].URL == "" {
+			return
+		}
+		resolved := urls[0]
+		if resolved.FreeTrial || !cacheableStream(song, resolved) {
+			return
+		}
+		if hasCached && resolved.Quality <= currentCached {
+			if path, ok := a.cache.LookupExact(song.ID, currentCached); ok {
+				a.recordCachedAsBest(song.ID, path, currentCached, vipType)
+			}
+			return
+		}
+		source := player.Source{
+			SongID:    song.ID,
+			Title:     song.Name,
+			Stream:    resolved.URL,
+			CachePath: a.cache.Path(song.ID, resolved.Quality),
+			Header:    http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
+		}
+		if err := player.FetchToCache(ctx, httpClient, source); err != nil {
+			return
+		}
+		a.work.push(func() {
+			if a.library == nil {
+				return
+			}
+			var size int64
+			if info, statErr := os.Stat(source.CachePath); statErr == nil {
+				size = info.Size()
+			}
+			_ = a.library.Put(store.CacheEntry{
+				SongID:    song.ID,
+				Quality:   resolved.Quality,
+				File:      store.Name(song.ID, resolved.Quality),
+				Size:      size,
+				SavedAt:   time.Now(),
+				Best:      resolved.Quality,
+				ProbedVIP: vipType,
+			})
+			a.cached.SetDirty()
+			a.toast("已缓存最高音质", song.Name+"："+resolved.Quality.String(), ui.ToastSuccess)
+		})
+		a.invalidate()
+	}()
+}
+
+// ----- transport & queue operations -----
+
 const userAgentHeader = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// current is the song the queue points at.
 func (a *App) current() (ncm.Song, bool) {
 	if a.queueAt < 0 || a.queueAt >= len(a.queue) {
 		return ncm.Song{}, false
@@ -285,35 +706,26 @@ func (a *App) current() (ncm.Song, bool) {
 	return a.queue[a.queueAt], true
 }
 
-// togglePlay pauses or resumes; with nothing loaded it starts the queue.
 func (a *App) togglePlay() {
 	switch a.engine.Snapshot().Status {
 	case player.StatusPlaying, player.StatusBuffering:
+		a.cancelPendingPlay()
 		a.engine.Pause()
 		a.playing = false
 	case player.StatusPaused:
-		a.engine.Resume(context.Background())
+		_ = a.engine.Resume(context.Background())
 		a.playing = true
 	default:
-		// A queue restored from the last run continues where it stopped, rather
-		// than starting the song over.
 		if len(a.queue) > 0 {
 			at := a.resumeAt
 			a.resumeAt = 0
-			if at > 0 {
-				a.playAtResuming(a.queueAt, at)
-			} else {
-				a.playAt(a.queueAt)
-			}
+			a.playAtResuming(a.queueAt, at)
 		}
 	}
 	a.updateMPRIS()
 	a.updateTray()
 }
 
-// advance moves the cursor by delta, honouring the repeat mode, and starts the
-// song. wrapToStart is set when skipping a song that could not play, which must
-// not loop forever.
 func (a *App) advance(delta int, fromFailure bool) {
 	if len(a.queue) == 0 {
 		return
@@ -326,6 +738,7 @@ func (a *App) advance(delta int, fromFailure bool) {
 		}
 	case store.RepeatOff:
 		if !fromFailure && delta > 0 && a.queueAt == len(a.queue)-1 {
+			a.cancelPendingPlay()
 			a.engine.Stop()
 			a.playing = false
 			a.persistQueue()
@@ -344,9 +757,6 @@ func (a *App) advance(delta int, fromFailure bool) {
 	a.playAt(next)
 }
 
-// finishedTrack is the engine's end-of-song report. In 心动模式 the queue is
-// extended before it advances, which is what makes the mode endless; after a
-// failure to extend it falls back to the ordinary repeat rules.
 func (a *App) finishedTrack() {
 	if len(a.queue) == 0 {
 		return
@@ -362,8 +772,6 @@ func (a *App) finishedTrack() {
 	a.advance(1, false)
 }
 
-// toggleHeartbeat starts or stops 心动模式: an endless queue built from the
-// recommender, seeded by the song that is playing.
 func (a *App) toggleHeartbeat() {
 	if a.heartbeat {
 		a.heartbeat = false
@@ -384,16 +792,11 @@ func (a *App) toggleHeartbeat() {
 	a.invalidate()
 }
 
-// extendHeartbeat appends recommended songs, seeded by the playlist the queue
-// came from and the song that just played.
 func (a *App) extendHeartbeat() bool {
 	song, ok := a.current()
 	if !ok {
 		return false
 	}
-	// The API wants the playlist the seed song belongs to; the last song of
-	// 我喜欢的音乐 works with the liked list, and a song of a playlist with that
-	// playlist. When neither is known, the seed song is its own context.
 	playlistID := a.heartbeatPlaylist
 	if playlistID == 0 {
 		playlistID = likedSongsID
@@ -426,49 +829,39 @@ func (a *App) extendHeartbeat() bool {
 	return true
 }
 
-// next plays the next song.
-func (a *App) next() { a.advance(1, false) }
-
-// previous plays the previous song.
+func (a *App) next()     { a.advance(1, false) }
 func (a *App) previous() { a.advance(-1, false) }
 
-// followPlayingSong keeps the lyrics page on the song that is playing. The page
-// is a view of playback rather than of the row that opened it: skipping to the
-// next song has to change the words on screen, or it shows the lyrics of a song
-// that has already ended.
 func (a *App) followPlayingSong(song ncm.Song) {
 	top := a.top()
 	if top.kind != routeLyrics || top.id == song.ID {
 		return
 	}
 	a.nav[len(a.nav)-1] = route{kind: routeLyrics, id: song.ID, title: song.Name}
+	a.lastLyricSong = 0
+	a.lastLyricLine = -1
 	a.loadLyric(song.ID)
 	a.invalidate()
 }
 
-// seekTo moves the transport.
 func (a *App) seekTo(at time.Duration) {
-	a.engine.Seek(at)
+	_ = a.engine.Seek(at)
 	a.updateMPRIS()
 }
 
-// playable filters the songs this account may stream, unless the user asked to
-// keep them. A cached song of a song with no rights left is still playable, so
-// the cache is consulted before a row is dropped.
 func (a *App) playable(songs []ncm.Song) []ncm.Song {
 	if !a.config.IgnoreUnplayable {
 		return songs
 	}
 	kept := make([]ncm.Song, 0, len(songs))
 	for _, song := range songs {
-		if song.Copyright().Playable() || a.cached.has(song.ID) {
+		if song.Copyright().Playable() || a.cached.Has(song.ID) {
 			kept = append(kept, song)
 		}
 	}
 	return kept
 }
 
-// addToQueue appends songs, starting the player when it was idle.
 func (a *App) addToQueue(songs []ncm.Song, playNow bool) {
 	songs = a.playable(songs)
 	if len(songs) == 0 {
@@ -490,10 +883,10 @@ func (a *App) addToQueue(songs []ncm.Song, playNow bool) {
 	a.invalidate()
 }
 
-// playSongs replaces the queue with songs and starts at index. The index is the
-// row the user pressed, which filtering cannot move: the song is looked up in
-// the filtered list, and dropped songs before it do not shift the start.
 func (a *App) playSongs(songs []ncm.Song, index int) {
+	if len(songs) == 0 {
+		return
+	}
 	if index < 0 || index >= len(songs) {
 		index = 0
 	}
@@ -510,13 +903,10 @@ func (a *App) playSongs(songs []ncm.Song, index int) {
 			break
 		}
 	}
-	songs = kept
-	index = start
-	a.playQueue(songs, index)
+	a.playQueue(kept, start)
 	a.invalidate()
 }
 
-// removeFromQueue takes a row out, keeping the current song playing.
 func (a *App) removeFromQueue(index int) {
 	if index < 0 || index >= len(a.queue) {
 		return
@@ -526,7 +916,9 @@ func (a *App) removeFromQueue(index int) {
 	switch {
 	case len(a.queue) == 0:
 		a.queueAt = 0
+		a.cancelPendingPlay()
 		a.engine.Stop()
+		a.playing = false
 	case index < current:
 		a.queueAt = current - 1
 	case index == current:
@@ -539,17 +931,16 @@ func (a *App) removeFromQueue(index int) {
 	a.invalidate()
 }
 
-// clearQueue empties the queue and stops.
 func (a *App) clearQueue() {
 	a.queue = nil
 	a.queueAt = 0
+	a.cancelPendingPlay()
 	a.engine.Stop()
 	a.playing = false
 	a.persistQueue()
 	a.invalidate()
 }
 
-// setVolume stores and applies the gain.
 func (a *App) setVolume(volume float64) {
 	a.config.Volume = volume
 	a.config.Muted = volume == 0 && a.config.Muted
@@ -558,7 +949,6 @@ func (a *App) setVolume(volume float64) {
 	a.invalidate()
 }
 
-// toggleMute flips the mute state.
 func (a *App) toggleMute() {
 	a.config.Muted = !a.config.Muted
 	a.engine.SetMuted(a.config.Muted)
@@ -567,7 +957,6 @@ func (a *App) toggleMute() {
 	a.invalidate()
 }
 
-// like toggles a song in 我喜欢的音乐.
 func (a *App) like(song ncm.Song) {
 	if a.user.UserID == 0 {
 		a.toast("需要登录", "扫码登录后才能收藏歌曲", ui.ToastError)
@@ -602,7 +991,6 @@ func (a *App) like(song ncm.Song) {
 	a.invalidate()
 }
 
-// subscribePlaylist collects or uncollects a playlist.
 func (a *App) subscribePlaylist(playlist ncm.Playlist) {
 	if a.user.UserID == 0 {
 		a.toast("需要登录", "扫码登录后才能收藏歌单", ui.ToastError)
@@ -633,23 +1021,22 @@ func (a *App) subscribePlaylist(playlist ncm.Playlist) {
 	a.invalidate()
 }
 
-// persistQueue writes the queue, its cursor and the position, so the next run
-// can offer to continue where this one stopped.
 func (a *App) persistQueue() {
-	snapshot := a.engine.Snapshot()
+	a.persistQueueAt(a.engine.Snapshot().Position)
+}
+
+func (a *App) persistQueueAt(pos time.Duration) {
 	queue := store.Queue{
 		Songs:      a.queue,
 		Index:      a.queueAt,
-		Position:   snapshot.Position,
+		Position:   pos,
 		WasPlaying: a.playing,
 	}
 	_ = a.queues.Save(queue)
 }
 
-// saveConfig writes the settings.
 func (a *App) saveConfig() { _ = a.settings.Save(a.config) }
 
-// firstNonEmpty returns the first non-empty string.
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -659,164 +1046,22 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// playingQuality names the tier a song is playing at, for the transport: the
-// level the server answered with, which is what the listener is hearing.
-func (a *App) playingQuality(song ncm.Song) string {
-	if a.queueAt < 0 || a.queueAt >= len(a.queue) || a.queue[a.queueAt].ID != song.ID {
-		return ""
+// progressPercent converts position/duration to a slider percentage in [0, 100]
+// snapped to the slider's 0.1 step so settleSlider never sees floating drift.
+func progressPercent(position, duration time.Duration) float32 {
+	if duration <= 0 || position <= 0 {
+		return 0
 	}
-	if actual := a.queue[a.queueAt].Actual; actual != 0 {
-		return actual.String()
+	if position >= duration {
+		return 100
 	}
-	return ""
-}
-
-// isBestTier reports whether a tier is the highest this account can stream for the
-// song, which is the only one worth writing to the cache.
-//
-// Asking for the highest tier and letting the server answer lower is how the
-// ceiling is learned: the answer's quality is that ceiling, so the tier just
-// played is the best one exactly when it is not below what the song was asked for.
-func (a *App) isBestTier(song ncm.Song, played ncm.Quality) bool {
-	if !song.SelectedSet {
-		// Nothing was chosen: the request was for the highest, so the answer is
-		// the best the server will give.
-		return true
+	pct := position.Seconds() / duration.Seconds() * 100
+	snapped := math.Round(pct*10) / 10
+	if snapped < 0 {
+		return 0
 	}
-	return played >= song.Selected
-}
-
-// fileWasCached records a file that just reached its final name. It runs on the
-// session's goroutine, so it only reads the name and the file, then hands the
-// record to the window thread.
-//
-// The name is the cache's own contract: music_<song>_<bitrate> names both the song
-// and the tier, so a file that appeared on disk becomes a table entry without the
-// engine knowing anything about songs.
-func (a *App) fileWasCached(path string) {
-	if a.library == nil || path == "" {
-		return
+	if snapped > 100 {
+		return 100
 	}
-	songID, quality, ok := store.ParseName(filepath.Base(path))
-	if !ok {
-		return
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-	entry := store.CacheEntry{
-		SongID:  songID,
-		Quality: quality,
-		File:    filepath.Base(path),
-		Size:    info.Size(),
-		SavedAt: time.Now(),
-		Best:    quality,
-	}
-	_ = a.library.Put(entry)
-	a.work.push(func() {
-		a.cached.setDirty()
-		song := ncm.Song{ID: songID, Name: entry.File}
-		for i := range a.queue {
-			if a.queue[i].ID == songID {
-				song = a.queue[i]
-				break
-			}
-		}
-		a.upgradeCache(song, quality)
-		a.invalidate()
-	})
-}
-
-// noteBestTier remembers the ceiling the server reported for a song, so a later
-// play knows whether a better file could be fetched.
-func (a *App) noteBestTier(song ncm.Song, played ncm.Quality) {
-	if a.library == nil {
-		return
-	}
-	_ = a.library.NoteBest(song.ID, played)
-}
-
-// upgradeCache fetches the best tier for a song whose file on disk is lower.
-//
-// This is what makes the cache worth having: after the subscription ends, the
-// songs that were heard while it was active play from disk at the tier that was
-// captured then, not at whatever happened to be streamed first.
-func (a *App) upgradeCache(song ncm.Song, have ncm.Quality) {
-	if a.library == nil {
-		return
-	}
-	if song.SelectedSet {
-		// The user asked for this tier on purpose: a lower one is not a gap to fill.
-		if song.Selected < have {
-			return
-		}
-	}
-	a.noteBestTier(song, have)
-	best, wanted := a.library.WantsBetter(song.ID)
-	if !wanted {
-		return
-	}
-	a.upgradeMu.Lock()
-	if a.upgrading[song.ID] {
-		a.upgradeMu.Unlock()
-		return
-	}
-	a.upgrading[song.ID] = true
-	a.upgradeMu.Unlock()
-
-	resolve := a.resolveURL
-	if resolve == nil {
-		resolve = a.client.SongURLs
-	}
-	httpClient := a.client.HTTPClient()
-	go func() {
-		defer func() {
-			a.upgradeMu.Lock()
-			delete(a.upgrading, song.ID)
-			a.upgradeMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		urls, err := resolve(ctx, []int64{song.ID}, best)
-		if err != nil || len(urls) == 0 || urls[0].URL == "" {
-			return
-		}
-		resolved := urls[0]
-		if resolved.Quality < best || !cacheableStream(song, resolved) {
-			// The server would not give the better tier, or answered with a trial:
-			// nothing worth writing.
-			return
-		}
-		source := player.Source{
-			Title:     song.Name,
-			Stream:    resolved.URL,
-			CachePath: a.cache.Path(song.ID, resolved.Quality),
-			Header:    http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
-		}
-		if err := player.FetchToCache(ctx, httpClient, source); err != nil {
-			return
-		}
-		a.work.push(func() {
-			if a.library == nil {
-				return
-			}
-			info, statErr := os.Stat(source.CachePath)
-			size := int64(0)
-			if statErr == nil {
-				size = info.Size()
-			}
-			_ = a.library.Put(store.CacheEntry{
-				SongID:  song.ID,
-				Quality: resolved.Quality,
-				File:    store.Name(song.ID, resolved.Quality),
-				Size:    size,
-				SavedAt: time.Now(),
-				Best:    resolved.Quality,
-			})
-			a.cached.setDirty()
-			a.toast("已缓存更高质量", song.Name+"："+resolved.Quality.String(), ui.ToastSuccess)
-		})
-		a.invalidate()
-	}()
+	return float32(snapped)
 }

@@ -409,36 +409,37 @@ func searchKey(keyword string, kind ncm.SearchKind, offset int) string {
 	return strconv.Itoa(int(kind)) + "|" + strconv.Itoa(offset) + "|" + keyword
 }
 
-// runSearch asks for one page of results. When more is true it appends.
+// runSearch asks for one page of results. When more is true it appends the next
+// page into the active search entry rather than writing to an unshown cache key.
 func (a *App) runSearch(more bool) {
 	keyword := a.search.field
 	if keyword == "" {
 		return
 	}
 	a.data.init()
+	kind := a.search.kind
+	key := searchKey(keyword, kind, 0)
+	data := a.data.searches[key]
 	offset := 0
 	if more {
-		if current := a.data.searches[searchKey(keyword, a.search.kind, 0)]; current != nil {
-			offset = len(current.result.Songs) + len(current.result.Artists) + len(current.result.Albums) + len(current.result.Playlists)
-			offset = current.offset + 50
+		if data == nil || data.busy || !data.more {
+			return
 		}
+		offset = data.offset + 50
+		data.busy = true
+	} else {
+		if data != nil && (data.busy || data.loaded) {
+			return
+		}
+		data = &searchData{}
+		a.data.searches[key] = data
+		data.begin()
 	}
-	key := searchKey(keyword, a.search.kind, offset)
-	if data := a.data.searches[key]; data != nil && (data.busy || data.loaded) {
-		return
-	}
-	data := &searchData{offset: offset}
-	a.data.searches[key] = data
-	data.begin()
-	kind := a.search.kind
 	a.background(func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		result, err := a.client.Search(ctx, keyword, kind, offset, 50)
 		a.work.push(func() {
-			// The keyword is part of what the user did, not of what the API
-			// answered: it is recorded whether the search succeeded or not, so a
-			// failed search can be tried again from the history.
 			history := []string{keyword}
 			for _, old := range a.config.SearchHistory {
 				if old != keyword && len(history) < 12 {
@@ -450,12 +451,25 @@ func (a *App) runSearch(more bool) {
 					a.config.SearchHistory = history
 					_ = a.settings.Save(a.config)
 				}
-				data.fail(err)
+				if !more {
+					data.fail(err)
+				} else {
+					data.busy = false
+				}
 				return
 			}
 			a.config.SearchHistory = history
 			_ = a.settings.Save(a.config)
-			data.result = result
+			if more {
+				data.result.Songs = append(data.result.Songs, result.Songs...)
+				data.result.Artists = append(data.result.Artists, result.Artists...)
+				data.result.Albums = append(data.result.Albums, result.Albums...)
+				data.result.Playlists = append(data.result.Playlists, result.Playlists...)
+				data.offset = offset
+			} else {
+				data.result = result
+				data.offset = 0
+			}
 			data.more = result.HasMore
 			data.busy = false
 			data.loaded = true

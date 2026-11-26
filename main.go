@@ -22,7 +22,7 @@ import (
 // tools/setversion.sh, which the release workflow runs before packaging: a
 // program that reports a different version from the package it came in is a bug
 // report waiting to happen.
-const version = "1.0.1"
+const version = "1.0.2"
 
 func main() {
 	if len(os.Args) > 1 {

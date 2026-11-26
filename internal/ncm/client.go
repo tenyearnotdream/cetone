@@ -227,6 +227,7 @@ func (s *cookieStore) initDeviceLocked() {
 // the UI runs several requests at once and they share its cookies.
 type Client struct {
 	http    *http.Client
+	media   *http.Client
 	cookies *cookieStore
 
 	mu   sync.RWMutex
@@ -238,53 +239,66 @@ type Client struct {
 	login   bool
 }
 
+func newTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+	}
+}
+
 // NewClient builds a client with no session. Cookies can be loaded before the
 // first request with LoadCookies.
 func NewClient() *Client {
-	transport := &http.Transport{
-		Proxy:       http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		// The API is HTTP/1.1 over TLS; a short idle window keeps a closed
-		// connection from being reused.
-		MaxIdleConns:        16,
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
 	return &Client{
 		http: &http.Client{
-			Transport: transport,
+			Transport: newTransport(),
 			Timeout:   requestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
+		// Media fetches (audio streams, cache downloads, cover art) must follow
+		// CDN redirects and must not be killed by a 30s total timeout while
+		// downloading a large lossless/Hi-Res track.
+		media: &http.Client{
+			Transport: newTransport(),
+		},
 		cookies: newCookieStore(),
 	}
 }
 
-// SetProxy points every request at a proxy URL (http, https, socks5). An empty
-// string goes back to the environment's proxy settings.
+// SetProxy points every request (both API and media) at a proxy URL (http,
+// https, socks5). An empty string goes back to the environment's proxy settings.
 func (c *Client) SetProxy(proxyURL string) error {
+	var proxyFn func(*http.Request) (*url.URL, error)
+	if proxyURL == "" {
+		proxyFn = http.ProxyFromEnvironment
+	} else {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return fmt.Errorf("ncm: parse proxy: %w", err)
+		}
+		if parsed.Scheme == "" {
+			parsed, err = url.Parse("http://" + proxyURL)
+			if err != nil {
+				return fmt.Errorf("ncm: parse proxy: %w", err)
+			}
+		}
+		proxyFn = http.ProxyURL(parsed)
+	}
 	transport, ok := c.http.Transport.(*http.Transport)
 	if !ok {
 		return fmt.Errorf("ncm: transport is not configurable")
 	}
-	if proxyURL == "" {
-		transport.Proxy = http.ProxyFromEnvironment
-		return nil
+	transport.Proxy = proxyFn
+	if mediaTransport, ok := c.media.Transport.(*http.Transport); ok {
+		mediaTransport.Proxy = proxyFn
 	}
-	parsed, err := url.Parse(proxyURL)
-	if err != nil {
-		return fmt.Errorf("ncm: parse proxy: %w", err)
-	}
-	if parsed.Scheme == "" {
-		parsed, err = url.Parse("http://" + proxyURL)
-		if err != nil {
-			return fmt.Errorf("ncm: parse proxy: %w", err)
-		}
-	}
-	transport.Proxy = http.ProxyURL(parsed)
 	return nil
 }
 
@@ -503,7 +517,7 @@ func (c *Client) SetTransport(transport http.RoundTripper) {
 	c.http.Transport = transport
 }
 
-// HTTPClient is the client the API uses, for work that fetches audio rather than
-// calling the API: a cache fetch must go through the same transport, proxy and
-// timeouts as everything else.
-func (c *Client) HTTPClient() *http.Client { return c.http }
+// HTTPClient returns a media HTTP client that shares proxy settings with the
+// API client, follows CDN redirects, and does not impose a short total request
+// timeout on large audio streams or cache downloads.
+func (c *Client) HTTPClient() *http.Client { return c.media }

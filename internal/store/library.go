@@ -36,8 +36,14 @@ type CacheEntry struct {
 	// SavedAt is when the file was last written.
 	SavedAt time.Time `json:"savedAt"`
 	// Best is the highest tier the server offered for this song when it was last
-	// played. It is what says whether a better file could still be fetched.
+	// probed. It is what says whether a better file could still be fetched.
 	Best ncm.Quality `json:"best"`
+	// ProbedVIP records the account's VIPType when Best was determined. When the
+	// account's VIP level is at or below ProbedVIP (including after VIP expires),
+	// a cached file at >= Best can play offline immediately without probing. When
+	// the account upgrades to a higher VIP level, the client probes once to see
+	// whether a higher quality is now available.
+	ProbedVIP int `json:"probedVip,omitempty"`
 }
 
 // Library is the table, kept in memory and written through to disk.
@@ -112,8 +118,16 @@ func (l *Library) Put(entry CacheEntry) error {
 	}
 	// Keep the best tier already known: a play at a lower tier must not erase the
 	// knowledge that a better one exists.
-	if previous, ok := l.entries[entry.SongID]; ok && entry.Best < previous.Best {
-		entry.Best = previous.Best
+	if previous, ok := l.entries[entry.SongID]; ok {
+		if entry.Best < previous.Best {
+			entry.Best = previous.Best
+		}
+		if entry.ProbedVIP < previous.ProbedVIP {
+			entry.ProbedVIP = previous.ProbedVIP
+		}
+	}
+	if entry.Best < entry.Quality {
+		entry.Best = entry.Quality
 	}
 	l.entries[entry.SongID] = entry
 	return l.saveLocked()
@@ -122,21 +136,56 @@ func (l *Library) Put(entry CacheEntry) error {
 // NoteBest records the best tier the server offered for a song, without claiming
 // it is on disk. It is how the cache learns that a better file is worth fetching.
 func (l *Library) NoteBest(songID int64, best ncm.Quality) error {
+	return l.NoteBestForVIP(songID, best, 0)
+}
+
+// NoteBestForVIP records the best tier the server offered for a song at the
+// account's current VIP level.
+func (l *Library) NoteBestForVIP(songID int64, best ncm.Quality, vipType int) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.loadLocked(); err != nil {
 		return err
 	}
-	entry := l.entries[songID]
+	entry, existed := l.entries[songID]
 	if entry.SongID == 0 {
 		entry.SongID = songID
 	}
-	if best <= entry.Best {
+	changed := !existed
+	if best > entry.Best {
+		entry.Best = best
+		changed = true
+	}
+	if vipType > entry.ProbedVIP {
+		entry.ProbedVIP = vipType
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	entry.Best = best
 	l.entries[songID] = entry
 	return l.saveLocked()
+}
+
+// IsBestCached reports whether a cached file at cachedQuality already satisfies
+// the known ceiling for songID at the account's current VIP level.
+func (l *Library) IsBestCached(songID int64, cachedQuality ncm.Quality, currentVIP int) bool {
+	if cachedQuality >= ncm.QualityMaster {
+		return true
+	}
+	entry, ok := l.Get(songID)
+	if !ok {
+		return false
+	}
+	if entry.File == "" && entry.Best == 0 && entry.ProbedVIP == 0 {
+		return false
+	}
+	// If the user upgraded to a higher VIP level than when we last probed,
+	// probe once more so we can upgrade the cache to higher quality.
+	if currentVIP > entry.ProbedVIP {
+		return false
+	}
+	return cachedQuality >= entry.Best
 }
 
 // Remove forgets a song, for a file that went away.

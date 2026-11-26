@@ -1,15 +1,12 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/vivaui/viva/app"
 
@@ -17,11 +14,7 @@ import (
 	"cetone/internal/store"
 )
 
-// The small helpers the pages and actions share: formatting, file copying, the
-// desktop's clipboard and file manager, and the cache the settings page can
-// rebuild when the user edits its directories.
-
-// humanBytes is a file size as a person reads it.
+// humanBytes formats a byte size into a human-readable unit string.
 func humanBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -35,14 +28,9 @@ func humanBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// strconvInt is the string form of an id, for a metadata field.
 func strconvInt(v int64) string { return strconv.FormatInt(v, 10) }
 
-// joinLines and splitLines convert between a list and the text area that edits
-// it.
-func joinLines(lines []string) string {
-	return strings.Join(lines, "\n")
-}
+func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 
 func splitLines(text string) []string {
 	var out []string
@@ -55,20 +43,16 @@ func splitLines(text string) []string {
 	return out
 }
 
-// newCacheWith rebuilds the cache when the user changes its directories.
 func newCacheWith(paths store.Paths, extra []string) *store.Cache {
 	return store.NewCache(paths, extra)
 }
 
-// storeSessionFrom is the session file's contents for a signed-in account.
 func storeSessionFrom(client *ncm.Client, user ncm.UserInfo) store.Session {
 	return store.Session{Cookies: client.Cookies(), User: user}
 }
 
-// exportPath is where a cached song is written when the user exports it: the
-// account's music folder, named after the song and its singer. The extension
-// follows the file's own container, sniffed from its first bytes rather than
-// assumed from the quality tier.
+// exportPath builds a target file path under ~/Music with an extension sniffed
+// from the cached file's magic header.
 func (a *App) exportPath(song ncm.Song) string {
 	dir := filepath.Join(homeOrDefault(), "Music")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -76,7 +60,7 @@ func (a *App) exportPath(song ncm.Song) string {
 	}
 	name := sanitizeFileName(song.Name + " - " + song.Singer())
 	extension := ".mp3"
-	if path, _, ok := a.cache.Lookup(song.ID, a.config.PreferredQuality()); ok {
+	if path, _, ok := a.cache.LookupBest(song.ID); ok {
 		if file, err := os.Open(path); err == nil {
 			var head [4]byte
 			if _, err := io.ReadFull(file, head[:]); err == nil {
@@ -87,13 +71,12 @@ func (a *App) exportPath(song ncm.Song) string {
 					extension = ".wav"
 				}
 			}
-			file.Close()
+			_ = file.Close()
 		}
 	}
 	return filepath.Join(dir, name+extension)
 }
 
-// sanitizeFileName removes the characters a file system refuses.
 func sanitizeFileName(name string) string {
 	replacer := strings.NewReplacer("/", "／", "\\", "＼", ":", "：", "*", "＊", "?", "？", "\"", "＂", "<", "＜", ">", "＞", "|", "｜", "\n", " ")
 	cleaned := strings.TrimSpace(replacer.Replace(name))
@@ -113,7 +96,6 @@ func homeOrDefault() string {
 	return os.TempDir()
 }
 
-// copyFile copies one file, leaving the destination's directory created.
 func copyFile(source, destination string) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
@@ -128,57 +110,15 @@ func copyFile(source, destination string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	return out.Close()
 }
 
-// downloadTo fetches a URL into a cache path, through a temporary file so a
-// partial transfer is never mistaken for a finished one.
-func downloadTo(ctx context.Context, rawURL, destination string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("User-Agent", userAgentHeader)
-	request.Header.Set("Referer", "https://music.163.com")
-	httpClient := &http.Client{Timeout: 5 * time.Minute}
-	response, err := httpClient.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载失败：HTTP %d", response.StatusCode)
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	part := destination + ".part"
-	file, err := os.Create(part)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(file, response.Body); err != nil {
-		file.Close()
-		os.Remove(part)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		os.Remove(part)
-		return err
-	}
-	return os.Rename(part, destination)
-}
-
-// appSetClipboard puts text on the system clipboard.
 func appSetClipboard(text string) error { return app.SetClipboardText(text) }
+func appOpenURL(rawURL string) error    { return app.OpenURL(rawURL) }
 
-// appOpenURL asks the desktop to open a link in its browser.
-func appOpenURL(rawURL string) error { return app.OpenURL(rawURL) }
-
-// appOpenPath asks the desktop to show a file or directory.
 func appOpenPath(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return err
@@ -186,8 +126,6 @@ func appOpenPath(path string) error {
 	return app.OpenPath(path)
 }
 
-// listState helpers: every list keeps its state in the model so a repaint does
-// not lose the scroll or the choice.
 func (a *App) initLists() {
 	if a.lyricList.Key == nil {
 		a.lyricList.Key = func(i int) int { return i }
@@ -203,7 +141,6 @@ func (a *App) initLists() {
 	}
 }
 
-// initQueueList gives the queue its row names, keys and drag-reorder, once.
 func (a *App) initQueueList() {
 	if a.queueList.Label != nil {
 		return
@@ -218,15 +155,11 @@ func (a *App) initQueueList() {
 		if i < 0 || i >= len(a.queue) {
 			return i
 		}
-		// A song id fits the list's 31-bit key range without hashing, so two
-		// different songs never share a row identity.
 		return int(a.queue[i].ID & 0x7FFFFFFF)
 	}
 	a.queueList.Reorder = a.reorderQueue
 }
 
-// reorderQueue moves the dragged rows to their new place, keeping the song that
-// is playing playing.
 func (a *App) reorderQueue(rows []int, to int) {
 	if len(rows) == 0 {
 		return
@@ -251,8 +184,6 @@ func (a *App) reorderQueue(rows []int, to int) {
 			rest = append(rest, song)
 		}
 	}
-	// The drop index counts the original rows: translate it into the remaining
-	// rows' own numbering before inserting.
 	insertAt := to
 	for _, row := range rows {
 		if row < to {

@@ -24,6 +24,7 @@ import (
 	"github.com/vivaui/viva/headless"
 
 	"cetone/internal/ncm"
+	"cetone/internal/player"
 	"cetone/internal/store"
 )
 
@@ -232,10 +233,13 @@ func TestAcceptanceCachedSongPlaysWithNoNetwork(t *testing.T) {
 		t.Skipf("the API returned no url for %q: %v", song.Name, err)
 	}
 	target := first.cache.Path(song.ID, urls[0].Quality)
-	if err := downloadTo(t.Context(), urls[0].URL, target); err != nil {
+	if err := player.FetchToCache(t.Context(), first.client.HTTPClient(), player.Source{
+		Stream:    urls[0].URL,
+		CachePath: target,
+	}); err != nil {
 		t.Fatalf("downloading %q: %v", song.Name, err)
 	}
-	first.cached.setDirty()
+	first.cached.SetDirty()
 	_ = session
 	t.Logf("first run cached %q at %s", song.Name, target)
 	first.engine.Close()
@@ -245,7 +249,7 @@ func TestAcceptanceCachedSongPlaysWithNoNetwork(t *testing.T) {
 	second, session2 := acceptanceApp(t, paths)
 	second.client.SetTransport(refuseTransport{})
 	second.cache = store.NewCache(paths, nil)
-	second.cached = newCacheIndex(second.cache)
+	second.cached = store.NewCacheIndex(second.cache)
 
 	second.queue = []ncm.Song{song}
 	second.queueAt = 0

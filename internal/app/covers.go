@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/draw"
 	_ "image/gif"
@@ -48,7 +49,7 @@ func (a *App) coverBitmapBox(rawURL string, width, height int) gfx.Bitmap {
 func (a *App) fetchCover(key coverKey) {
 	data, ok := a.covers.Load(key.url, key.width)
 	if !ok {
-		fetched, err := downloadCover(key.url)
+		fetched, err := downloadCover(a.client.HTTPClient(), key.url)
 		if err != nil {
 			a.work.push(func() {
 				delete(a.coverLoading, key)
@@ -75,9 +76,13 @@ func (a *App) fetchCover(key coverKey) {
 
 // downloadCover fetches one image with a short timeout: art is decoration, and
 // a stalled server must not hold a worker.
-func downloadCover(rawURL string) ([]byte, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+func downloadCover(client *http.Client, rawURL string) ([]byte, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}

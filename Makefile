@@ -8,8 +8,11 @@ all: vet test build
 build:
 	go tool viva build
 
+# Run directly rather than through `viva dev`: Cetone uses app.RunApplication
+# for the system tray, MPRIS, and background Invalidator wakeups, which viva's
+# single-window dev reload worker does not support.
 run:
-	go tool viva dev .
+	go run .
 
 test:
 	go test ./... -count=1

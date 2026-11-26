@@ -86,7 +86,7 @@ func headlessModel(t *testing.T) *App {
 		// plays from disk.
 		writeTestWav(t, a.cache.Path(song.ID, a.config.PreferredQuality()), 8000, 2, 3)
 	}
-	a.cached.setDirty()
+	a.cached.SetDirty()
 	a.engine.NewSink = func() playerSink { return &countingSink{} }
 	return a
 }

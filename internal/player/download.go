@@ -20,10 +20,9 @@ var ErrUnsupportedFormat = errors.New("player: unsupported audio format")
 // engine keeps tracking the position so the window, the lyrics and MPRIS work.
 var ErrNoDevice = errors.New("player: no audio output device")
 
-// download fetches a URL into a file, appending as it goes so a decoder can
-// start on the first bytes instead of the last. Partial files land under the
-// caller's path with a ".part" suffix, so an interrupted transfer never looks
-// like a finished cache entry.
+// download fetches a URL into a .part file, appending as bytes arrive so a
+// decoder can start immediately. A condition variable wakes readers as soon as
+// new bytes land or the transfer ends, avoiding polling latency.
 type download struct {
 	path   string
 	file   *os.File
@@ -33,23 +32,21 @@ type download struct {
 
 	written atomic.Int64
 	size    atomic.Int64
-	// keep reports that the transfer's bytes now live at their final name, so
-	// Close must not delete them.
+	// keep reports that the transfer's bytes now live at their final cache name,
+	// so Close must not delete them.
 	keep atomic.Bool
 
 	mu     sync.Mutex
+	cond   *sync.Cond
 	done   bool
 	err    error
 	cancel context.CancelFunc
 	closed atomic.Bool
 }
 
-// startDownload opens the .part file and begins fetching. It returns before
-// any byte has arrived; tailFile and waitDone observe progress.
+// startDownload opens the .part file and starts streaming into it in the
+// background.
 func startDownload(parent context.Context, client *http.Client, rawURL, path string, header http.Header) (*download, error) {
-	// The first play of a song creates its cache directory: a fresh install has
-	// none, and a download that cannot open its file would otherwise turn every
-	// streamed song into "cannot play".
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
@@ -60,7 +57,15 @@ func startDownload(parent context.Context, client *http.Client, rawURL, path str
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	d := &download{path: path, file: file, http: client, url: rawURL, header: header, cancel: cancel}
+	d := &download{
+		path:   path,
+		file:   file,
+		http:   client,
+		url:    rawURL,
+		header: header,
+		cancel: cancel,
+	}
+	d.cond = sync.NewCond(&d.mu)
 	go d.run(ctx)
 	return d, nil
 }
@@ -69,6 +74,7 @@ func (d *download) run(ctx context.Context) {
 	fail := func(err error) {
 		d.mu.Lock()
 		d.err = err
+		d.cond.Broadcast()
 		d.mu.Unlock()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.url, nil)
@@ -83,7 +89,9 @@ func (d *download) run(ctx context.Context) {
 	}
 	resp, err := d.http.Do(req)
 	if err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() != nil {
+			fail(context.Canceled)
+		} else {
 			fail(err)
 		}
 		return
@@ -105,53 +113,59 @@ func (d *download) run(ctx context.Context) {
 				return
 			}
 			d.written.Add(int64(n))
+			d.mu.Lock()
+			d.cond.Broadcast()
+			d.mu.Unlock()
 		}
 		if readErr != nil {
 			d.mu.Lock()
 			switch {
 			case readErr == io.EOF:
-				// A transfer that ends by itself is complete only when it
-				// delivered what the server promised; a truncated answer is not
-				// the song and must never become the cache entry.
+				// Only a transfer delivering all promised bytes is complete.
 				if expected := d.size.Load(); expected > 0 && d.written.Load() < expected {
 					d.err = fmt.Errorf("player: download ended after %d of %d bytes", d.written.Load(), expected)
 				} else {
 					d.done = true
 				}
 			case ctx.Err() != nil:
-				// Cancelled: the session was closed or replaced. Not an error the
-				// user sees, and not a finished file.
 				d.err = context.Canceled
 			default:
 				d.err = readErr
 			}
+			d.cond.Broadcast()
 			d.mu.Unlock()
 			return
 		}
 	}
 }
 
-// waitDone waits for the transfer to finish, reporting whether it completed.
+// waitDone blocks until the transfer finishes, fails, is closed, or times out.
 func (d *download) waitDone(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	timer := time.AfterFunc(timeout, func() {
 		d.mu.Lock()
-		done, err := d.done, d.err
+		d.cond.Broadcast()
 		d.mu.Unlock()
-		if err != nil {
+	})
+	defer timer.Stop()
+	deadline := time.Now().Add(timeout)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for {
+		if d.err != nil {
 			return false
 		}
-		if done {
+		if d.done {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if d.closed.Load() || time.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(20 * time.Millisecond)
+		d.cond.Wait()
 	}
 }
 
-// complete reports a finished, successful transfer: every promised byte arrived.
+// complete reports whether every promised byte arrived with no error.
 func (d *download) complete() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -164,42 +178,47 @@ func (d *download) complete() bool {
 	return true
 }
 
-// progress reports bytes written and the expected total (0 when unknown).
+// progress reports bytes written and expected total (0 when unknown).
 func (d *download) progress() (written, total int64) {
 	return d.written.Load(), d.size.Load()
 }
 
-// err returns the transfer's error, if any.
 func (d *download) errLocked() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.err
 }
 
-// Close stops the transfer and closes the file. The partial file is removed
-// unless the whole thing arrived.
+// Close cancels the transfer, wakes any waiting readers, and deletes the
+// partial file unless it finished or was already promoted to the cache.
 func (d *download) Close() error {
 	if d.closed.Swap(true) {
 		return nil
 	}
 	d.cancel()
+	d.mu.Lock()
+	if !d.done && d.err == nil {
+		d.err = context.Canceled
+	}
+	d.cond.Broadcast()
+	d.mu.Unlock()
 	err := d.file.Close()
 	if !d.complete() && !d.keep.Load() {
-		os.Remove(d.path)
+		_ = os.Remove(d.path)
 	}
 	return err
 }
 
-// tailFile reads a file that may still be growing. It is an io.ReadSeeker, as
-// the decoders expect; a read at the current end waits for the download rather
-// than reporting a premature end of file.
+// tailFile reads a file that may still be growing. A read at the current end
+// waits on the download's condition variable until new bytes arrive or the
+// transfer finishes.
 type tailFile struct {
 	file     *os.File
 	download *download
 	offset   int64
+	closed   atomic.Bool
 }
 
-// openTail opens the growing file for reading.
 func (d *download) openTail() (*tailFile, error) {
 	file, err := os.Open(d.path)
 	if err != nil {
@@ -210,6 +229,9 @@ func (d *download) openTail() (*tailFile, error) {
 
 func (t *tailFile) Read(p []byte) (int, error) {
 	for {
+		if t.closed.Load() {
+			return 0, os.ErrClosed
+		}
 		n, err := t.file.Read(p)
 		if n > 0 {
 			t.offset += int64(n)
@@ -218,15 +240,27 @@ func (t *tailFile) Read(p []byte) (int, error) {
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		if t.download.complete() {
-			return 0, io.EOF
+		d := t.download
+		d.mu.Lock()
+		for !t.closed.Load() && !d.done && d.err == nil && t.offset >= d.written.Load() {
+			d.cond.Wait()
 		}
-		if derr := t.download.errLocked(); derr != nil {
+		done, derr := d.done, d.err
+		d.mu.Unlock()
+
+		if t.closed.Load() {
+			return 0, os.ErrClosed
+		}
+		// Always try reading remaining bytes before declaring EOF.
+		if t.offset < d.written.Load() {
+			continue
+		}
+		if derr != nil {
 			return 0, derr
 		}
-		// No more bytes yet and the transfer is still running: wait for the
-		// writer to append, then try again.
-		time.Sleep(15 * time.Millisecond)
+		if done {
+			return 0, io.EOF
+		}
 	}
 }
 
@@ -239,38 +273,46 @@ func (t *tailFile) Seek(offset int64, whence int) (int64, error) {
 		target = t.offset + offset
 	case io.SeekEnd:
 		target = t.download.written.Load() + offset
+	default:
+		return 0, fmt.Errorf("player: invalid seek whence %d", whence)
 	}
 	if target < 0 {
 		return 0, fmt.Errorf("player: negative seek offset")
 	}
-	if t.download.complete() && t.download.errLocked() == nil {
-		// A finished file seeks anywhere inside it.
+	if t.download.complete() {
 		pos, err := t.file.Seek(target, io.SeekStart)
-		t.offset = pos
+		if err == nil {
+			t.offset = pos
+		}
 		return pos, err
 	}
 	if target > t.download.written.Load() {
 		return 0, fmt.Errorf("player: seek to %d past the %d bytes downloaded", target, t.download.written.Load())
 	}
 	pos, err := t.file.Seek(target, io.SeekStart)
-	t.offset = pos
+	if err == nil {
+		t.offset = pos
+	}
 	return pos, err
 }
 
-// Close closes the read handle; the download keeps running.
-func (t *tailFile) Close() error { return t.file.Close() }
+// Close closes the read handle and wakes any blocked Read.
+func (t *tailFile) Close() error {
+	t.closed.Store(true)
+	t.download.mu.Lock()
+	t.download.cond.Broadcast()
+	t.download.mu.Unlock()
+	return t.file.Close()
+}
 
-// FetchToCache downloads a source straight to its cache file and leaves it there,
-// without playing it. It is how a song already heard at one tier gets its better
-// file: the listener keeps listening, and the copy that will still play after the
-// subscription ends is fetched beside it.
-//
-// It reports an error rather than a partial file: a transfer that did not deliver
-// every byte is deleted, because a fragment at the cache name would be played as
-// the song from then on.
+// FetchToCache downloads a source straight into its final cache file without
+// playing it, atomically renaming only after every promised byte has arrived.
 func FetchToCache(ctx context.Context, client *http.Client, source Source) error {
 	if source.Stream == "" || source.CachePath == "" {
 		return errors.New("player: fetch: a stream and a cache path are needed")
+	}
+	if client == nil {
+		client = http.DefaultClient
 	}
 	part := source.CachePath + ".part"
 	d, err := startDownload(ctx, client, source.Stream, part, source.Header)
@@ -293,7 +335,6 @@ func FetchToCache(ctx context.Context, client *http.Client, source Source) error
 	if err := os.Rename(part, source.CachePath); err != nil {
 		return err
 	}
-	// The bytes live at their final name: Close must not delete them.
 	d.keep.Store(true)
 	return nil
 }

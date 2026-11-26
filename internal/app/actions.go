@@ -3,13 +3,16 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 
 	"cetone/internal/ncm"
+	"cetone/internal/player"
+	"cetone/internal/store"
 )
 
 // Actions the pages call: opening the special lists, logging in and out,
@@ -296,7 +299,7 @@ func (a *App) afterLogin() {
 				a.toast("登录失败", errText(err), ui.ToastError)
 				return
 			}
-			a.user = user
+			a.setUser(user)
 			_ = a.sessions.Save(storeSessionFrom(a.client, user))
 			a.toast("登录成功", user.Nickname, ui.ToastSuccess)
 			// Everything the account affects is now stale.
@@ -319,7 +322,7 @@ func (a *App) logout() {
 		defer cancel()
 		a.client.Logout(ctx)
 		a.work.push(func() {
-			a.user = ncm.UserInfo{}
+			a.setUser(ncm.UserInfo{})
 			a.likedSet = make(map[int64]bool)
 			a.data.mine = mineData{}
 			a.data.discover.loaded = false
@@ -341,7 +344,6 @@ func (a *App) loginModal(c ui.C) {
 	if a.login.mode == "" {
 		a.login.mode = loginModeQR
 	}
-	theme := c.Theme()
 	title := "扫码登录"
 	if a.login.mode == loginModePhone {
 		title = "手机号登录"
@@ -375,7 +377,6 @@ func (a *App) loginModal(c ui.C) {
 			}
 		})
 	})
-	_ = theme
 }
 
 // loginQRPanel is the QR half of the panel.
@@ -383,7 +384,7 @@ func (a *App) loginQRPanel(c ui.C) {
 	theme := c.Theme()
 	ui.Column(c).Gap(14).Items(ui.Center).Children(func() {
 		// The code itself, drawn from the module grid.
-		ui.Row(c).Size(200, 200).Radius(8).Background(gfx.RGB(255, 255, 255)).Center().Children(func() {
+		ui.Row(c).Size(200, 200).Radius(8).Background(ui.RGB(255, 255, 255)).Center().Children(func() {
 			if len(a.login.qr) == 0 {
 				if a.login.busy {
 					ui.Spinner(c)
@@ -477,38 +478,86 @@ func (a *App) copySongLink(song ncm.Song) {
 	a.invalidate()
 }
 
-// cachePlaylist asks for every song's URL so each is stored as it plays; a
-// background worker downloads them one at a time into the cache.
+// cachePlaylist downloads every song in playlist at the highest available VIP
+// quality, skipping songs already cached at their known best tier and refusing
+// to cache trial previews.
 func (a *App) cachePlaylist(playlist ncm.Playlist) {
-	if len(playlist.Tracks) == 0 {
+	a.cacheSongs(playlist.Tracks)
+}
+
+func (a *App) cacheSongs(tracks []ncm.Song) {
+	if len(tracks) == 0 {
 		return
 	}
-	a.toast("开始缓存", fmt.Sprintf("%d 首，下载完成后可离线播放", len(playlist.Tracks)), ui.ToastDefault)
-	quality := a.config.PreferredQuality()
-	songs := append([]ncm.Song(nil), playlist.Tracks...)
+	a.toast("开始缓存最高音质", fmt.Sprintf("共 %d 首，下载完成后可离线播放", len(tracks)), ui.ToastDefault)
+	songs := append([]ncm.Song(nil), tracks...)
+	vipType := a.currentVIP()
+	resolve := a.resolveURL
+	if resolve == nil {
+		resolve = a.client.SongURLs
+	}
+	httpClient := a.client.HTTPClient()
 	a.background(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 		defer cancel()
 		done := 0
+		skipped := 0
 		for _, song := range songs {
-			if _, _, ok := a.cache.Lookup(song.ID, quality); ok {
+			bestPath, bestCached, hasCache := a.cache.LookupBest(song.ID)
+			if hasCache && a.cacheIsAlreadyBest(song.ID, bestCached, vipType) {
+				skipped++
 				continue
 			}
-			urls, err := a.client.SongURLs(ctx, []int64{song.ID}, quality)
+			urls, err := resolve(ctx, []int64{song.ID}, ncm.QualityMaster)
 			if err != nil || len(urls) == 0 || urls[0].URL == "" {
 				continue
 			}
-			if err := downloadTo(ctx, urls[0].URL, a.cache.Path(song.ID, urls[0].Quality)); err != nil {
+			resolved := urls[0]
+			if resolved.FreeTrial || !cacheableStream(song, resolved) {
 				continue
 			}
+			if hasCache && resolved.Quality <= bestCached {
+				a.recordCachedAsBest(song.ID, bestPath, bestCached, vipType)
+				skipped++
+				continue
+			}
+			dest := a.cache.Path(song.ID, resolved.Quality)
+			source := player.Source{
+				SongID:    song.ID,
+				Title:     song.Name,
+				Stream:    resolved.URL,
+				CachePath: dest,
+				Header:    http.Header{"Referer": {"https://music.163.com"}, "User-Agent": {userAgentHeader}},
+			}
+			if err := player.FetchToCache(ctx, httpClient, source); err != nil {
+				continue
+			}
+			var size int64
+			if info, statErr := os.Stat(dest); statErr == nil {
+				size = info.Size()
+			}
+			if a.library != nil {
+				_ = a.library.Put(store.CacheEntry{
+					SongID:    song.ID,
+					Quality:   resolved.Quality,
+					File:      store.Name(song.ID, resolved.Quality),
+					Size:      size,
+					SavedAt:   time.Now(),
+					Best:      resolved.Quality,
+					ProbedVIP: vipType,
+				})
+			}
+			a.cached.SetDirty()
 			done++
+			progress := done + skipped
 			a.work.push(func() {
-				a.toast("缓存中", fmt.Sprintf("已完成 %d/%d", done, len(songs)), ui.ToastDefault)
+				a.toast("缓存中", fmt.Sprintf("已完成 %d/%d", progress, len(songs)), ui.ToastDefault)
 			})
 			a.invalidate()
 		}
 		a.work.push(func() {
-			a.toast("缓存完成", fmt.Sprintf("%d 首已保存到本地", done), ui.ToastSuccess)
+			a.cached.SetDirty()
+			a.toast("缓存完成", fmt.Sprintf("新缓存 %d 首（已有最高音质 %d 首）", done, skipped), ui.ToastSuccess)
 		})
 		a.invalidate()
 		return nil

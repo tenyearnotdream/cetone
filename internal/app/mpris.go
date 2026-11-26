@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"time"
 
 	"cetone/internal/mpris"
@@ -26,13 +25,13 @@ func (a *App) startMPRIS() {
 			Previous:  func() { a.work.push(func() { a.previous() }); a.invalidate() },
 			Seek: func(offset mpris.Duration) {
 				a.work.push(func() {
-					position := a.engine.Snapshot().Position + time.Duration(offset)
+					position := a.engine.Snapshot().Position + time.Duration(offset)*time.Microsecond
 					a.seekTo(position)
 				})
 				a.invalidate()
 			},
 			SetPosition: func(position mpris.Duration) {
-				a.work.push(func() { a.seekTo(time.Duration(position)) })
+				a.work.push(func() { a.seekTo(time.Duration(position) * time.Microsecond) })
 				a.invalidate()
 			},
 			SetVolume: func(volume float64) {
@@ -49,7 +48,7 @@ func (a *App) startMPRIS() {
 	a.updateMPRIS()
 }
 
-// mprisUpdate publishes the current song and state.
+// updateMPRIS publishes the current song and state.
 func (a *App) updateMPRIS() {
 	if a.mprisServer == nil {
 		return
@@ -64,16 +63,28 @@ func (a *App) updateMPRIS() {
 	}
 	track := mpris.Track{}
 	if song, ok := a.current(); ok {
+		length := snapshot.Duration
+		if length <= 0 {
+			length = song.Duration
+		}
 		track = mpris.Track{
 			ID:     strconvInt(song.ID),
 			Title:  song.Name,
 			Artist: song.Singer(),
 			Album:  song.Album.Name,
-			Length: mpris.Duration(song.Duration),
+			Length: mpris.Duration(length.Microseconds()),
 			ArtURL: ncm.CoverURL(song.Album.PicURL, 512),
 		}
 	}
-	a.mprisServer.Update(track, status, mpris.Duration(snapshot.Position), snapshot.Volume)
+	a.mprisServer.Update(track, status, mpris.Duration(snapshot.Position.Microseconds()), snapshot.Volume)
+}
+
+// publishMPRISPosition pushes the latest playback position in microseconds.
+func (a *App) publishMPRISPosition(pos time.Duration) {
+	if a.mprisServer == nil {
+		return
+	}
+	a.mprisServer.PublishPosition(mpris.Duration(pos.Microseconds()))
 }
 
 // stopMPRIS releases the bus name.
@@ -83,8 +94,6 @@ func (a *App) stopMPRIS() {
 		a.mprisServer = nil
 	}
 }
-
-var _ = context.Background
 
 // StartMPRISForTest exposes the media controls, for a program that opens its
 // own window: Run does this itself.

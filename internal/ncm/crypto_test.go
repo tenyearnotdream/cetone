@@ -170,7 +170,7 @@ func TestCoverURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Query().Get("param") != "200 y 200" {
+	if parsed.Query().Get("param") != "200y200" {
 		t.Fatalf("cover url %q does not carry the size request", got)
 	}
 	if other := "https://example.com/a.jpg"; CoverURL(other, 100) != other {

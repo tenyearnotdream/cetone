@@ -15,6 +15,7 @@ import (
 	"github.com/vivaui/viva/app"
 
 	"cetone/internal/ncm"
+	"cetone/internal/player"
 	"cetone/internal/store"
 )
 
@@ -115,10 +116,13 @@ func TestLiveCachedSongPlaysFromDisk(t *testing.T) {
 		t.Skipf("the API returned no url: %v", err)
 	}
 	target := a.cache.Path(song.ID, urls[0].Quality)
-	if err := downloadTo(t.Context(), urls[0].URL, target); err != nil {
+	if err := player.FetchToCache(t.Context(), a.client.HTTPClient(), player.Source{
+		Stream:    urls[0].URL,
+		CachePath: target,
+	}); err != nil {
 		t.Fatalf("download: %v", err)
 	}
-	a.cached.setDirty()
+	a.cached.SetDirty()
 
 	// The cache has it, under the name the GTK client would have used.
 	path, _, ok := a.cache.Lookup(song.ID, ncm.QualityStandard)

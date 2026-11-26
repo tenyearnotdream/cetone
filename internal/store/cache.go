@@ -58,6 +58,37 @@ func (c *Cache) PartPath(songID int64, quality ncm.Quality) string {
 	return c.Path(songID, quality) + ".part"
 }
 
+// LookupExact finds a cached file for the song at exactly the requested quality.
+func (c *Cache) LookupExact(songID int64, quality ncm.Quality) (string, bool) {
+	return c.find(Name(songID, quality))
+}
+
+// LookupBest finds the highest-quality cached file for the song across all
+// cache directories.
+func (c *Cache) LookupBest(songID int64) (string, ncm.Quality, bool) {
+	all := ncm.Qualities()
+	for i := len(all) - 1; i >= 0; i-- {
+		q := all[i]
+		if path, ok := c.find(Name(songID, q)); ok {
+			return path, q, true
+		}
+	}
+	return "", 0, false
+}
+
+// CachedQualities returns every quality cached on disk for the song, ordered
+// from lowest to highest.
+func (c *Cache) CachedQualities(songID int64) []ncm.Quality {
+	all := ncm.Qualities()
+	var found []ncm.Quality
+	for _, q := range all {
+		if _, ok := c.find(Name(songID, q)); ok {
+			found = append(found, q)
+		}
+	}
+	return found
+}
+
 // Lookup finds a cached file for the song at exactly the quality, then at the
 // closest other quality. The second result is the quality that was found.
 //
