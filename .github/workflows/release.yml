@@ -64,26 +64,13 @@ jobs:
             build/*.tar.gz
             build/*.deb
 
-  # Windows: build both programs, have SignPath sign them in ONE signing request
-  # (one approval per release), then zip the signed programs.
-  #
-  # SignPath (free for open source through the SignPath Foundation) only signs
-  # what a GitHub-hosted runner built and uploaded as a workflow artifact: the
-  # action hands SignPath the artifact id, SignPath fetches it from GitHub,
-  # verifies which repository, workflow, commit and runner produced it, signs
-  # the .exe files inside (see .signpath/artifact-configuration.xml) and the
-  # action downloads the result. No certificate or private key ever touches
-  # this repository or the runner.
-  #
-  # Signing is skipped (and the release ships unsigned, as before) until the
-  # SIGNPATH_API_TOKEN secret and the SIGNPATH_ORGANIZATION_ID variable exist;
-  # see docs/code-signing.md.
   windows:
-    name: windows (build, sign, package)
+    name: windows ${{ matrix.arch }}
     runs-on: ubuntu-latest
-    env:
-      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-      SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -92,80 +79,20 @@ jobs:
           cache: true
 
       # The one place the version is set: it writes viva.toml (the package
-      # metadata and the version resource in the .exe) and main.go (what the
-      # program prints for --version), so the two cannot disagree.
+      # metadata) and main.go (what the program prints for --version), so the
+      # two cannot disagree.
       - name: Set the version
         run: tools/setversion.sh "${VERSION}"
 
-      - name: Build the programs
-        run: |
-          for arch in amd64 arm64; do
-            go tool viva build --target windows --arch "$arch"
-          done
-          mkdir -p unsigned
-          mv build/cetone-windows-*.exe unsigned/
-          ls -l unsigned
-
-      # The artifact SignPath fetches. Its id, not its name, is what the
-      # signing request refers to.
-      - name: Upload the unsigned programs
-        id: unsigned
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-unsigned
-          path: unsigned/*.exe
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Sign with SignPath
-        id: signpath
-        if: env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_ORGANIZATION_ID != ''
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'cetone' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG || 'initial' }}
-          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          # A release-signing policy waits for a person to approve the request
-          # in SignPath; give them time instead of failing after ten minutes.
-          wait-for-completion-timeout-in-seconds: 18000
-          output-artifact-directory: signed
-
-      - name: Check the signatures
-        if: steps.signpath.outcome == 'success'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends osslsigncode
-          for exe in signed/*.exe; do
-            echo "== $exe"
-            osslsigncode verify -in "$exe" | grep -E 'Signer|Subject|Signature verification' || true
-            # A file that came back unsigned must fail the release, not ship.
-            osslsigncode extract-signature -in "$exe" -out "$RUNNER_TEMP/sig.der" >/dev/null
-          done
-
-      - name: Use the unsigned programs
-        if: steps.signpath.outcome != 'success'
-        run: |
-          echo "::warning::SignPath is not configured: the Windows programs are NOT signed (see docs/code-signing.md)"
-          mkdir -p signed
-          cp unsigned/*.exe signed/
-
-      # The zip holds just cetone.exe; --program packages the signed file
-      # as it is instead of building (and so unsigning) it again.
+      # A zip of the program and its libraries. The NSIS installer needs
+      # makensis, which the windows-latest image carries but this one does not;
+      # a zip keeps a release reproducible from a single host.
       - name: Package
-        run: |
-          for arch in amd64 arm64; do
-            go tool viva package --target windows --arch "$arch" --format zip \
-              --no-sign --program "signed/cetone-windows-$arch.exe"
-          done
-          ls -l build/*.zip
+        run: go tool viva package --target windows --arch ${{ matrix.arch }} --format zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-${{ matrix.arch }}
           path: build/*.zip
 
   macos:
