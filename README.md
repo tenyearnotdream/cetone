@@ -166,7 +166,7 @@ make build     # = go tool viva build，产出 build/cetone
 make test      # = go test ./... -count=1（无窗口，驱动真实页面与输入）
 make vet       # gofmt + go vet + go tool viva vet
 make package   # = go tool viva package --target linux（tar.gz）
-make run       # = go tool viva dev .（热重载）
+make run       # = go run .（托盘/MPRIS 需要 RunApplication，viva dev 的热重载不支持）
 ```
 
 需要 Go 1.26+；`viva` 命令由 `go.mod` 的 `tool` 行固定版本，用 `go tool viva` 调用，
@@ -198,10 +198,15 @@ deb 包已把上面这些写进 `Depends`。没有声卡时程序照常运行：
 Release 并附 `SHA256SUMS`。`.github/workflows/ci.yml` 在每次提交上跑 vet、测试与
 四平台交叉编译检查。
 
-**签名**：默认不签名。Linux 包与 Windows zip 未签名（Windows 会提示 SmartScreen）；
-macOS 未签名时需要右键“打开”。要签名就在仓库 Secrets 里配
+**签名**：Windows 程序通过 [SignPath](https://signpath.io) 在 Release workflow 里自动签名
+（开源项目由 SignPath Foundation 免费提供证书），配置方法与代码签名策略见
+[docs/code-signing.md](docs/code-signing.md)；未配置时照常发布未签名的 zip。
+Linux 包不签名；macOS 未签名时需要右键“打开”。要签 macOS 就在仓库 Secrets 里配
 `APPLE_SIGNING_IDENTITY`（配合 `APPLE_CERTIFICATE`/`APPLE_ID` 等），workflow 会自动改用
 签名并额外产出 `.dmg`，无需改代码。
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/).
 
 ## 发布到此仓库
 
@@ -321,6 +326,7 @@ Smart App Control（SAC，Windows 11）不是安装器的问题，也不是缺�
 
 | 做法 | 效果 | 代价 |
 | --- | --- | --- |
+| **SignPath Foundation（本项目采用）** | 受信任 CA 签名，SAC 放行；SmartScreen 随下载量积累声誉 | 开源项目免费，需申请并每次发版人工批准，见 [docs/code-signing.md](docs/code-signing.md) |
 | 不签名，文档写清楚 | 用户需在「Windows 安全中心 → 应用和浏览器控制」里关掉 SAC | 关掉后**不能重新开启**（只能重置/重装系统），多数用户不会接受 |
 | 向公共 CA 买代码签名证书（OV/EV） | SAC 放行；SmartScreen 仍需积累声誉（EV 起步更快） | 按年付费；2023 年 6 月起私钥必须放在硬件令牌或云 HSM 里 |
 | 上架 Microsoft Store（MSIX） | 商店包由微软签名，SAC 放行 | 需要开发者账号并过审 |
